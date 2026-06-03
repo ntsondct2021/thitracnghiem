@@ -7,8 +7,21 @@ import { GoogleGenAI, Type } from "@google/genai";
 import AdmZip from "adm-zip";
 import mammoth from "mammoth";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const getAppDir = () => {
+  try {
+    if (typeof __dirname !== "undefined") {
+      return __dirname;
+    }
+  } catch (e) {}
+  
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch (e) {}
+
+  return process.cwd();
+};
+
+const serverDir = getAppDir();
 
 // Lazy initializer for Gemini client to avoid crashes if GEMINI_API_KEY is not configured on startup
 let geminiClient: any = null;
@@ -671,7 +684,7 @@ function postprocessMammothHtml(html: string): string {
   return processedHtml;
 }
 
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = path.join(serverDir, "data");
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR);
 }
