@@ -191,7 +191,7 @@ export default function HomeView({
           </div>
 
           <h1 className="text-4xl sm:text-5xl md:text-6xl font-black text-slate-900 tracking-tight leading-tight">
-            Nền Tảng Thi <span className="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent">Trắc Nghiệm</span> Trực Tuyến Tự Do
+            Nền Tảng Thi <br></br><span className="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent">Trắc Nghiệm Trực Tuyến</span> 
           </h1>
 
           <p className="text-slate-600 max-w-2xl text-sm sm:text-base leading-relaxed font-semibold">
@@ -200,7 +200,7 @@ export default function HomeView({
 
           <div className="flex flex-wrap items-center justify-center gap-4 pt-4">
             <button
-              onClick={() => {
+              onClick={() => {  
                 const element = document.getElementById("bài-thi");
                 if (element) element.scrollIntoView({ behavior: "smooth" });
               }}
