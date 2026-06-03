@@ -147,7 +147,7 @@ export default function HomeView({
                   </defs>
                 </svg>
                 <span className="font-extrabold text-lg sm:text-xl tracking-tight bg-gradient-to-r from-indigo-750 to-blue-650 bg-clip-text text-indigo-700">
-                  TINHOC DCT
+                  EZTEST
                 </span>
               </div>
               <p className="text-[10px] font-bold text-slate-400 tracking-wider mt-0.5">HỆ THỐNG THI TRỰC TUYẾN</p>
@@ -191,7 +191,7 @@ export default function HomeView({
           </div>
 
           <h1 className="text-4xl sm:text-5xl md:text-6xl font-black text-slate-900 tracking-tight leading-tight">
-            Nền Tảng Thi <br></br><span className="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent">Trắc Nghiệm Trực Tuyến</span> 
+            Nền Tảng Thi <span className="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent">Trắc Nghiệm</span> Trực Tuyến Tự Do
           </h1>
 
           <p className="text-slate-600 max-w-2xl text-sm sm:text-base leading-relaxed font-semibold">
@@ -403,10 +403,9 @@ export default function HomeView({
                     </linearGradient>
                   </defs>
                 </svg>
-                <span className="font-extrabold text-base tracking-tight text-white">TINHOC DCT MULTI-PORTAL</span>
+                <span className="font-extrabold text-base tracking-tight text-white">EZTEST MULTI-PORTAL</span>
               </div>
-              <span className="text-[10px] text-slate-500 font-bold tracking-wider mt-0.5 block">HỆ THỐNG THI TRẮC NGHIỆM CHUYÊN NGHIỆP</span>
-              <span className="text-[10px] text-slate-500 font-bold tracking-wider mt-0.5 block">Tác giả: Nguyễn Thanh Sơn</span>
+              <span className="text-[10px] text-slate-500 font-bold tracking-wider mt-0.5 block">HỆ THỐNG THI TRẮC NGHIỆM TỰ DO & CHÍNH THỨC</span>
             </div>
           </div>
 

@@ -14,7 +14,12 @@
 - Chế độ chống gian lận: Cảnh báo khi chuyển tab, hỗ trợ toàn màn hình.
 - Xem kết quả ngay sau khi nộp bài với bảng điểm chi tiết từng phần.
 
-
+### 2. Quản trị viên
+- Đăng nhập bằng tài khoản quản trị viên với mật khẩu mặc định hệ thống là `admin123`.
+- Dashboard thống kê kết quả thi bằng biểu đồ trực quan.
+- Quản lý ngân hàng câu hỏi (hiện tại hỗ trợ qua JSON API).
+- Xuất danh sách kết quả thi ra file Excel (.xlsx).
+- Theo dõi phổ điểm và tỷ lệ đạt yêu cầu.
 
 ## Cấu trúc điểm thi (TNTHPT 2025)
 - **Phần 1**: 18 câu x 0.25đ = 4.5đ.
