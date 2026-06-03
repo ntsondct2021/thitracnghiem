@@ -147,7 +147,7 @@ export default function HomeView({
                   </defs>
                 </svg>
                 <span className="font-extrabold text-lg sm:text-xl tracking-tight bg-gradient-to-r from-indigo-750 to-blue-650 bg-clip-text text-indigo-700">
-                  EZTEST
+                  TINHOC DCT
                 </span>
               </div>
               <p className="text-[10px] font-bold text-slate-400 tracking-wider mt-0.5">HỆ THỐNG THI TRỰC TUYẾN</p>
@@ -403,9 +403,10 @@ export default function HomeView({
                     </linearGradient>
                   </defs>
                 </svg>
-                <span className="font-extrabold text-base tracking-tight text-white">EZTEST MULTI-PORTAL</span>
+                <span className="font-extrabold text-base tracking-tight text-white">TINHOC DCT MULTI-PORTAL</span>
               </div>
-              <span className="text-[10px] text-slate-500 font-bold tracking-wider mt-0.5 block">HỆ THỐNG THI TRẮC NGHIỆM TỰ DO & CHÍNH THỨC</span>
+              <span className="text-[10px] text-slate-500 font-bold tracking-wider mt-0.5 block">HỆ THỐNG THI TRẮC NGHIỆM CHUYÊN NGHIỆP</span>
+              <span className="text-[10px] text-slate-500 font-bold tracking-wider mt-0.5 block">Tác giả: Nguyễn Thanh Sơn</span>
             </div>
           </div>
 
