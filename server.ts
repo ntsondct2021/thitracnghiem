@@ -747,6 +747,18 @@ const dbRun = async (sql: string, params: any[] = []): Promise<{ lastID: number;
     const id = params[0];
     if (sqlClean.includes("folders")) {
       dbState.folders = dbState.folders.filter(f => String(f.id) !== String(id));
+      dbState.folders = dbState.folders.map(f => {
+        if (String(f.parentId) === String(id)) {
+          return { ...f, parentId: undefined };
+        }
+        return f;
+      });
+      dbState.students = dbState.students.map(s => {
+        if (String(s.folderId) === String(id)) {
+          return { ...s, folderId: undefined };
+        }
+        return s;
+      });
     } else if (sqlClean.includes("questions")) {
       dbState.questions = dbState.questions.filter(q => String(q.id) !== String(id));
     } else if (sqlClean.includes("students")) {
@@ -764,9 +776,9 @@ const dbRun = async (sql: string, params: any[] = []): Promise<{ lastID: number;
 
   // INSERTS
   if (sqlClean.startsWith("insert into folders")) {
-    const [id, name, createdAt, teacherId] = params;
+    const [id, name, createdAt, teacherId, parentId, type] = params;
     const existingIdx = dbState.folders.findIndex(f => f.id === id);
-    const folder = { id, name, createdAt, teacherId: teacherId || undefined };
+    const folder = { id, name, createdAt, teacherId: teacherId || undefined, parentId: parentId || undefined, type: type || 'question' };
     if (existingIdx >= 0) {
       dbState.folders[existingIdx] = { ...dbState.folders[existingIdx], ...folder };
     } else {
@@ -790,14 +802,15 @@ const dbRun = async (sql: string, params: any[] = []): Promise<{ lastID: number;
   }
 
   if (sqlClean.startsWith("insert into students")) {
-    const [id, name, createdAt, teacherId, className] = params;
+    const [id, name, createdAt, teacherId, className, folderId] = params;
     const existingIdx = dbState.students.findIndex(s => s.id === id);
     const student = { 
       id, 
       name, 
       createdAt,
       teacherId: teacherId || undefined,
-      className: className || undefined
+      className: className || undefined,
+      folderId: folderId || undefined
     };
     if (existingIdx >= 0) {
       dbState.students[existingIdx] = { ...dbState.students[existingIdx], ...student };
@@ -935,13 +948,13 @@ async function startServer() {
 
   app.post("/api/folders", async (req, res) => {
     try {
-      const { id, name, createdAt, teacherId } = req.body;
+      const { id, name, createdAt, teacherId, parentId, type } = req.body;
       if (!id || !name) {
         return res.status(400).json({ error: "Missing required fields folder" });
       }
       await dbRun(
-        "INSERT INTO folders (id, name, createdAt, teacherId) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, createdAt=excluded.createdAt",
-        [id, name, createdAt || new Date().toISOString(), teacherId || null]
+        "INSERT INTO folders (id, name, createdAt, teacherId, parentId, type) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, createdAt=excluded.createdAt, parentId=excluded.parentId, type=excluded.type",
+        [id, name, createdAt || new Date().toISOString(), teacherId || null, parentId || null, type || 'question']
       );
       res.json({ success: true });
     } catch (err: any) {
@@ -1309,8 +1322,8 @@ CÁC QUY TẮC BẮT BUỘC VÀ QUAN TRỌNG:
       try {
         for (const s of studentsToSave) {
           await dbRun(
-            "INSERT INTO students (id, name, createdAt, teacherId, className) VALUES (?, ?, ?, ?, ?)",
-            [s.id, s.name, s.createdAt || new Date().toISOString(), s.teacherId || null, s.className || null]
+            "INSERT INTO students (id, name, createdAt, teacherId, className, folderId) VALUES (?, ?, ?, ?, ?, ?)",
+            [s.id, s.name, s.createdAt || new Date().toISOString(), s.teacherId || null, s.className || null, s.folderId || null]
           );
         }
         await dbRun("COMMIT");
@@ -1328,6 +1341,28 @@ CÁC QUY TẮC BẮT BUỘC VÀ QUAN TRỌNG:
     try {
       await dbRun("DELETE FROM students WHERE id = ?", [req.params.id]);
       res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/students/bulk-delete", async (req, res) => {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: "Missing or invalid students list to delete" });
+      }
+      await dbRun("BEGIN TRANSACTION");
+      try {
+        for (const id of ids) {
+          await dbRun("DELETE FROM students WHERE id = ?", [id]);
+        }
+        await dbRun("COMMIT");
+        res.json({ success: true, count: ids.length });
+      } catch (transactionErr) {
+        await dbRun("ROLLBACK");
+        throw transactionErr;
+      }
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1385,7 +1420,7 @@ CÁC QUY TẮC BẮT BUỘC VÀ QUAN TRỌNG:
 
   app.post("/api/exam-rooms", async (req, res) => {
     try {
-      const { id, name, code, duration, startTime, endTime, releaseTime, isActive, questionIds, part1Point, part2Point1, part2Point2, part2Point3, part2Point4, part3Point, allowReview, teacherId } = req.body;
+      const { id, name, code, duration, startTime, endTime, releaseTime, isActive, questionIds, part1Point, part2Point1, part2Point2, part2Point3, part2Point4, part3Point, allowReview, teacherId, shuffleQuestions, shuffleAnswers } = req.body;
       const qIdsStr = questionIds ? JSON.stringify(questionIds) : '[]';
       const activeInt = isActive ? 1 : 0;
       await dbRun(
@@ -1416,6 +1451,8 @@ CÁC QUY TẮC BẮT BUỘC VÀ QUAN TRỌNG:
         existing.allowReview = typeof allowReview === 'boolean' ? allowReview : true;
         existing.teacherId = teacherId || undefined;
         existing.isFree = typeof req.body.isFree === 'boolean' ? req.body.isFree : false;
+        existing.shuffleQuestions = typeof shuffleQuestions === 'boolean' ? shuffleQuestions : false;
+        existing.shuffleAnswers = typeof shuffleAnswers === 'boolean' ? shuffleAnswers : false;
         saveDB();
       }
       res.json({ success: true });

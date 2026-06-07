@@ -24,11 +24,22 @@ import {
 import { SAMPLE_QUESTIONS } from "./constants";
 // @ts-ignore
 import mammoth from "mammoth/mammoth.browser";
+import * as XLSX from "xlsx";
 import katex from "katex";
 import { SafeHtmlRenderer } from "./components/SafeHtmlRenderer";
 import HomeView from "./components/HomeView";
 import ReactQuill from "react-quill-new";
 import "react-quill-new/dist/quill.snow.css";
+import { 
+  Document as DocxDocument, 
+  Packer as DocxPacker, 
+  Paragraph as DocxParagraph, 
+  TextRun as DocxTextRun, 
+  Table as DocxTable, 
+  TableRow as DocxTableRow, 
+  TableCell as DocxTableCell, 
+  WidthType as DocxWidthType 
+} from "docx";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -779,10 +790,84 @@ interface ExamProps {
   showConfirm: (title: string, message: string, onConfirm: () => void) => void;
 }
 
+// Stable seeded random and shuffle helpers to guarantee consistent scrambled layouts for a single candidate session
+const seedRandom = (seedStr: string) => {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < seedStr.length; i++) {
+    h = Math.imul(h ^ seedStr.charCodeAt(i), 16777619);
+  }
+  return () => {
+    h += 0xe120fc15;
+    let tmp = Math.imul(h ^ (h >>> 15), 1 | h);
+    tmp = (tmp + Math.imul(tmp ^ (tmp >>> 7), 61 | tmp)) ^ tmp;
+    return ((tmp ^ (tmp >>> 14)) >>> 0) / 4294967296;
+  };
+};
+
+const seededShuffle = <T,>(array: T[], seed: string): T[] => {
+  const rand = seedRandom(seed);
+  const copy = [...array];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+};
+
 function ExamView({ currentExam, questions, user, timeLeft, answers, setAnswers, onSubmitExam, showConfirm }: ExamProps) {
-  const examQuestions = useMemo(() => questions.filter(q => currentExam.questionIds.includes(q.id)), [questions, currentExam]);
+  // Retrieve or generate a session-stable random seed for shuffling questions/answers.
+  // This allows different attempts from the same candidate (or different candidates with identical details)
+  // to get completely independent shuffled views, while resisting browser refreshes during a single active attempt.
+  const uniqueAttemptSeed = useMemo(() => {
+    const sessionKey = `exam-attempt-seed-${currentExam.id}-${user?.sbd || "GUEST"}`;
+    let seed = sessionStorage.getItem(sessionKey);
+    if (!seed) {
+      seed = Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
+      sessionStorage.setItem(sessionKey, seed);
+    }
+    return seed;
+  }, [currentExam.id, user]);
+
+  const examQuestions = useMemo(() => {
+    const filtered = questions.filter(q => currentExam.questionIds.includes(q.id));
+    if (currentExam.shuffleQuestions) {
+      const studentSeed = (user?.sbd || "GUEST") + "-" + currentExam.id + "-" + uniqueAttemptSeed;
+      
+      const p1 = filtered.filter(q => q.part === PartType.PART1);
+      const p2 = filtered.filter(q => q.part === PartType.PART2);
+      const p3 = filtered.filter(q => q.part === PartType.PART3);
+
+      const p1Shuffled = seededShuffle(p1, studentSeed + "-part1");
+      const p2Shuffled = seededShuffle(p2, studentSeed + "-part2");
+      const p3Shuffled = seededShuffle(p3, studentSeed + "-part3");
+
+      return [...p1Shuffled, ...p2Shuffled, ...p3Shuffled];
+    }
+    return filtered;
+  }, [questions, currentExam, user, uniqueAttemptSeed]);
+
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const currentQuestion = examQuestions[currentQuestionIndex];
+
+  // Dynamically shuffle answer options for PART1 if enabled in the exam configuration
+  const optionKeys = useMemo(() => {
+    const defaultKeys = ['A', 'B', 'C', 'D'];
+    if (currentExam.shuffleAnswers && currentQuestion && currentQuestion.part === PartType.PART1) {
+      const questionSeed = (user?.sbd || "GUEST") + "-" + currentExam.id + "-" + currentQuestion.id + "-" + uniqueAttemptSeed + "-opt";
+      return seededShuffle(defaultKeys, questionSeed);
+    }
+    return defaultKeys;
+  }, [currentExam, currentQuestion, user, uniqueAttemptSeed]);
+
+  // Dynamically shuffle statement options for PART2 if enabled in the exam configuration
+  const part2StatementKeys = useMemo(() => {
+    const defaultKeys = ['a', 'b', 'c', 'd'];
+    if (currentExam.shuffleAnswers && currentQuestion && currentQuestion.part === PartType.PART2) {
+      const questionSeed = (user?.sbd || "GUEST") + "-" + currentExam.id + "-" + currentQuestion.id + "-" + uniqueAttemptSeed + "-stmt";
+      return seededShuffle(defaultKeys, questionSeed);
+    }
+    return defaultKeys;
+  }, [currentExam, currentQuestion, user, uniqueAttemptSeed]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -853,75 +938,82 @@ function ExamView({ currentExam, questions, user, timeLeft, answers, setAnswers,
                 <div className="space-y-4 flex-1">
                   {currentQuestion.part === PartType.PART1 && (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {['A', 'B', 'C', 'D'].map((opt) => (
-                        <button
-                          key={opt}
-                          onClick={() => setAnswers(prev => ({ ...prev, [currentQuestion.id]: opt }))}
-                          className={cn(
-                            "flex items-center p-4 rounded-xl border-2 transition-all text-left group",
-                            answers[currentQuestion.id] === opt 
-                              ? "border-indigo-650 border-indigo-650 bg-indigo-50/50 text-indigo-950" 
-                              : "border-gray-100 hover:border-indigo-200 hover:bg-gray-50/55"
-                          )}
-                        >
-                          <span className={cn(
-                            "w-8 h-8 rounded-lg flex items-center justify-center font-bold mr-4 transition-colors text-xs shrink-0",
-                            answers[currentQuestion.id] === opt 
-                              ? "bg-indigo-600 text-white" 
-                              : "bg-gray-100 text-gray-500 group-hover:bg-indigo-100 group-hover:text-indigo-600"
-                          )}>
-                            {opt}
-                          </span>
-                          <span className="font-semibold text-sm flex-1">
-                            <SafeHtmlRenderer html={(currentQuestion as any)[opt]} />
-                          </span>
-                        </button>
-                      ))}
+                      {['A', 'B', 'C', 'D'].map((visualLabel, index) => {
+                        const optKey = optionKeys[index];
+                        return (
+                          <button
+                            key={visualLabel}
+                            onClick={() => setAnswers(prev => ({ ...prev, [currentQuestion.id]: optKey }))}
+                            className={cn(
+                              "flex items-center p-4 rounded-xl border-2 transition-all text-left group",
+                              answers[currentQuestion.id] === optKey 
+                                ? "border-indigo-650 border-indigo-650 bg-indigo-50/50 text-indigo-950" 
+                                : "border-gray-100 hover:border-indigo-200 hover:bg-gray-50/55"
+                            )}
+                          >
+                            <span className={cn(
+                              "w-8 h-8 rounded-lg flex items-center justify-center font-bold mr-4 transition-colors text-xs shrink-0",
+                              answers[currentQuestion.id] === optKey 
+                                ? "bg-indigo-600 text-white" 
+                                : "bg-gray-100 text-gray-500 group-hover:bg-indigo-100 group-hover:text-indigo-600"
+                            )}>
+                              {visualLabel}
+                            </span>
+                            <span className="font-semibold text-sm flex-1">
+                              <SafeHtmlRenderer html={(currentQuestion as any)[optKey]} />
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
 
-                  {currentQuestion.part === PartType.PART2 && (
+                  {currentQuestion.part === PartType.PART2 && currentQuestion.statements && (
                     <div className="space-y-4">
-                      {Object.entries(currentQuestion.statements || {}).map(([key, text]) => (
-                        <div key={key} className="flex flex-col md:flex-row md:items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100 gap-4 font-sans">
-                          <span className="font-semibold text-gray-755 text-gray-800 text-sm flex-1 flex items-start gap-1.5">
-                            <span className="font-black text-indigo-600 font-mono text-xs shrink-0 mt-0.5">{key}.</span>
-                            <span className="flex-1">
-                              <SafeHtmlRenderer html={text} />
+                      {part2StatementKeys.map((stmtKey, index) => {
+                        const visualLabel = ['a', 'b', 'c', 'd'][index];
+                        const text = (currentQuestion.statements as any)[stmtKey];
+                        return (
+                          <div key={stmtKey} className="flex flex-col md:flex-row md:items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100 gap-4 font-sans">
+                            <span className="font-semibold text-gray-755 text-gray-800 text-sm flex-1 flex items-start gap-1.5">
+                              <span className="font-black text-indigo-600 font-mono text-xs shrink-0 mt-0.5">{visualLabel}.</span>
+                              <span className="flex-1">
+                                <SafeHtmlRenderer html={text} />
+                              </span>
                             </span>
-                          </span>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => setAnswers(prev => ({
-                                ...prev,
-                                [currentQuestion.id]: { ...(prev[currentQuestion.id] || {}), [key]: true }
-                              }))}
-                              className={cn(
-                                "px-5 py-1.5 rounded-lg text-xs font-bold transition-all",
-                                answers[currentQuestion.id]?.[key] === true
-                                  ? "bg-green-600 text-white shadow-md shadow-green-100"
-                                  : "bg-white text-gray-500 border border-gray-200 hover:bg-green-50"
-                              )}
-                            >
-                              Đúng
-                            </button>
-                            <button
-                              onClick={() => setAnswers(prev => ({
-                                ...prev,
-                                [currentQuestion.id]: { ...(prev[currentQuestion.id] || {}), [key]: false }
-                              }))}
-                              className={cn(
-                                "px-5 py-1.5 rounded-lg text-xs font-bold transition-all",
-                                answers[currentQuestion.id]?.[key] === false
-                                  ? "bg-red-650 bg-red-600 text-white shadow-md shadow-red-100"
-                                  : "bg-white text-gray-500 border border-gray-200 hover:bg-red-50"
-                              )}
-                            >
-                              Sai
-                            </button>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => setAnswers(prev => ({
+                                  ...prev,
+                                  [currentQuestion.id]: { ...(prev[currentQuestion.id] || {}), [stmtKey]: true }
+                                }))}
+                                className={cn(
+                                  "px-5 py-1.5 rounded-lg text-xs font-bold transition-all",
+                                  answers[currentQuestion.id]?.[stmtKey] === true
+                                    ? "bg-green-600 text-white shadow-md shadow-green-100"
+                                    : "bg-white text-gray-500 border border-gray-200 hover:bg-green-50"
+                                )}
+                              >
+                                Đúng
+                              </button>
+                              <button
+                                onClick={() => setAnswers(prev => ({
+                                  ...prev,
+                                  [currentQuestion.id]: { ...(prev[currentQuestion.id] || {}), [stmtKey]: false }
+                                }))}
+                                className={cn(
+                                  "px-5 py-1.5 rounded-lg text-xs font-bold transition-all",
+                                  answers[currentQuestion.id]?.[stmtKey] === false
+                                    ? "bg-red-650 bg-red-650 bg-red-600 text-white shadow-md shadow-red-100"
+                                    : "bg-white text-gray-500 border border-gray-200 hover:bg-red-50"
+                                )}
+                              >
+                                Sai
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
 
@@ -2357,11 +2449,15 @@ const parseWordHtml = (htmlString: string, folderId?: string): Question[] => {
         let stmtHTML = (node as Element).innerHTML || textContent;
         stmtHTML = stmtHTML.replace(/^(?:<strong>)?([a-d])[\s.)\u2013-]*(?:<\/strong>)?\s*/i, "");
         
+        const lowerText = textContent.toLowerCase().trim();
         let isTrue = true;
-        if (/(?:[\s\-\(\[]Sai[\s\)\]]|$)/i.test(textContent) || textContent.endsWith("Sai")) {
+        if (/(?:[\s\-\(\[]|^)sai[\s\)\(\[\]\.]*$/i.test(lowerText)) {
           isTrue = false;
+        } else if (/(?:[\s\-\(\[]|^)đúng[\s\)\(\[\]\.]*$/i.test(lowerText) || /(?:[\s\-\(\[]|^)dung[\s\)\(\[\]\.]*$/i.test(lowerText)) {
+          isTrue = true;
         }
-        stmtHTML = stmtHTML.replace(/[-\s\(\[\]]*(?:Đúng|Sai\s*)[-\s\)\(\[\]]*$/i, "").trim();
+        
+        stmtHTML = stmtHTML.replace(/[-\s\(\[\]\.]*(?:[Đđ]úng|[Ss]ai)[-\s\)\(\[\]\.]*$/i, "").trim();
 
         if (!currentQuestion.statements) {
           currentQuestion.statements = { a: "", b: "", c: "", d: "" };
@@ -2425,6 +2521,11 @@ function AdminDashboard({
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
   const [isStudentModalOpen, setIsStudentModalOpen] = useState(false);
   const [isExamModalOpen, setIsExamModalOpen] = useState(false);
+  const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
+  const [isExcelImportModalOpen, setIsExcelImportModalOpen] = useState(false);
+  const [excelPreviewStudents, setExcelPreviewStudents] = useState<Student[]>([]);
+  const [excelImportErrors, setExcelImportErrors] = useState(0);
+  const [excelSelectedFolderId, setExcelSelectedFolderId] = useState<string>("");
   
   const [isManualQuestionModalOpen, setIsManualQuestionModalOpen] = useState(false);
   const [isWordImportModalOpen, setIsWordImportModalOpen] = useState(false);
@@ -2474,10 +2575,16 @@ function AdminDashboard({
   };
   
   const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>([]);
+  const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
   const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null);
   const [editingExamRoomId, setEditingExamRoomId] = useState<string | null>(null);
   
-  const [newFolder, setNewFolder] = useState({ name: "" });
+  const [newFolder, setNewFolder] = useState<{ name: string; parentId?: string; type?: 'question' | 'student' }>({ name: "", parentId: undefined, type: "question" });
+  const [studentFolderFilter, setStudentFolderFilter] = useState<string>("ALL");
+  const [resultsClassFilter, setResultsClassFilter] = useState<string>("ALL");
+  const [resultsExamFilter, setResultsExamFilter] = useState<string>("ALL");
+  const [isStatsExpanded, setIsStatsExpanded] = useState<boolean>(true);
+  const [expandedFolderIds, setExpandedFolderIds] = useState<Record<string, boolean>>({});
   const [newStudent, setNewStudent] = useState({ name: "", sbd: "", className: "" });
   const [newExam, setNewExam] = useState({ 
     name: "", 
@@ -2491,9 +2598,11 @@ function AdminDashboard({
     part2Point2: 0.25,
     part2Point3: 0.5,
     part2Point4: 1.0,
-    part3Point: 0.25,
+    part3Point: 0.5,
     allowReview: true,
-    isFree: false
+    isFree: false,
+    shuffleQuestions: false,
+    shuffleAnswers: false
   });
 
   // Random Select Question state fields
@@ -2606,11 +2715,15 @@ function AdminDashboard({
             const stmtLet = statementMatch[1].toLowerCase() as "a" | "b" | "c" | "d";
             let textContent = statementMatch[2].trim();
             
+            const lowerText = textContent.toLowerCase().trim();
             let isTrue = true;
-            if (/(?:[\s\-\(\[]Sai[\s\)\]]|$)/i.test(textContent) || textContent.endsWith("Sai")) {
+            if (/(?:[\s\-\(\[]|^)sai[\s\)\(\[\]\.]*$/i.test(lowerText)) {
               isTrue = false;
+            } else if (/(?:[\s\-\(\[]|^)đúng[\s\)\(\[\]\.]*$/i.test(lowerText) || /(?:[\s\-\(\[]|^)dung[\s\)\(\[\]\.]*$/i.test(lowerText)) {
+              isTrue = true;
             }
-            textContent = textContent.replace(/[-\s\(\[\]]*(?:Đúng|Sai\s*)[-\s\)\(\[\]]*$/i, "").trim();
+            
+            textContent = textContent.replace(/[-\s\(\[\]\.]*(?:[Đđ]úng|[Ss]ai)[-\s\)\(\[\]\.]*$/i, "").trim();
             
             if (!currentQuestion.statements) {
               currentQuestion.statements = { a: "", b: "", c: "", d: "" };
@@ -2910,72 +3023,370 @@ function AdminDashboard({
   };
 
   const handleDownloadSampleDoc = () => {
-    const docContent = `
-      <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-      <head><meta charset="utf-8"><title>Mẫu file câu hỏi</title></head>
-      <body style="font-family:'Times New Roman', Times, serif; font-size:12pt; line-height:1.5; padding:20px;">
-        <h2>MẪU FILE CÂU HỎI NGÂN HÀNG TNTHPT 2025</h2>
-        <p><i>Lưu ý: Bạn có thể lưu file dưới dạng tài liệu Word (.docx). Hệ thống sẽ tự động bóc tách các câu hỏi thành 3 Phần chuẩn và hỗ trợ giữ nguyên bảng biểu, ảnh đính kèm (MathType dạng ảnh) hoặc các công thức dạng LaTeX ($ ... $ / $$ ... $$) để biên dịch sang định dạng chuẩn KaTeX cực đẹp.</i></p>
-        
-        <h3>[Phần 1]</h3>
-        <p>Câu 1: Cho hàm số bậc ba $y = ax^3 + bx^2 + cx + d \\ (a \\neq 0)$ có bảng biến thiên sau. Hỏi đồ thị hàm số có bao nhiêu cực trị?</p>
-        <p>A. 2 cực trị</p>
-        <p>B. 1 cực trị</p>
-        <p>C. 3 cực trị</p>
-        <p>D. Có cực đại, không cực tiểu</p>
-        <p>Đáp án: A</p>
-        
-        <p>Câu 2: Công thức giải nhanh nghiệm phương trình bậc hai $ax^2 + bx + c = 0 \\ (a \\neq 0)$ có biệt thức $\\Delta = b^2 - 4ac > 0$ là:</p>
-        <p>A. $x = \\frac{-b \\pm \\sqrt{\\Delta}}{2a}$</p>
-        <p>B. $x = \\frac{-b \\pm \\Delta}{2a}$</p>
-        <p>C. $x = \\frac{b \\pm \\sqrt{\\Delta}}{2a}$</p>
-        <p>D. x không xác định</p>
-        <p>Đáp án: A</p>
+    const doc = new DocxDocument({
+      sections: [
+        {
+          properties: {},
+          children: [
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "MẪU FILE CÂU HỎI NGÂN HÀNG TNTHPT 2025",
+                  bold: true,
+                  size: 28, // 14pt
+                }),
+              ],
+              spacing: { after: 200 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Lưu ý: Bạn có thể lưu file dưới dạng tài liệu Word (.docx). Hệ thống sẽ tự động bóc tách các câu hỏi thành 3 Phần chuẩn và hỗ trợ giữ nguyên bảng biểu, ảnh đính kèm (MathType dạng ảnh) hoặc các công thức dạng LaTeX ($ ... $ / $$ ... $$) để biên dịch sang định dạng chuẩn KaTeX cực đẹp.",
+                  italics: true,
+                  size: 22, // 11pt
+                }),
+              ],
+              spacing: { after: 300 },
+            }),
 
-        <h3>[Phần 2]</h3>
-        <p>Câu 3: Cho bảng số liệu sau về nhiệt độ trung bình một số tháng tại Thủ đô Hà Nội:</p>
-        <table border="1" style="border-collapse:collapse; width:100%; max-width:400px; border:1px solid #e2e8f0; margin:10px 0;">
-          <thead>
-            <tr style="background:#f1f5f9; text-align:center;">
-              <th style="padding:6px; border:1px solid #cbd5e1; font-weight:bold;">Tháng 1</th>
-              <th style="padding:6px; border:1px solid #cbd5e1; font-weight:bold;">Tháng 6</th>
-              <th style="padding:6px; border:1px solid #cbd5e1; font-weight:bold;">Tháng 12</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr style="text-align:center;">
-              <td style="padding:6px; border:1px solid #cbd5e1;">$16.4^oC$</td>
-              <td style="padding:6px; border:1px solid #cbd5e1;">$29.8^oC$</td>
-              <td style="padding:6px; border:1px solid #cbd5e1;">$18.2^oC$</td>
-            </tr>
-          </tbody>
-        </table>
-        <p>Xét tính Đúng/Sai của các mệnh đề:</p>
-        <p>a. Tháng 6 có nhiệt độ trung bình cao nhất trong ba tháng kể trên. - Đúng</p>
-        <p>b. Biên độ nhiệt lệch giữa tháng 6 và tháng 1 lớn hơn $15.0^oC$. - Sai</p>
-        <p>c. Nhiệt độ trung bình của tháng 12 mát hơn nhiệt độ mùa hè. - Đúng</p>
-        <p>d. Nhiệt độ tháng 1 là thấp nhất trong 3 tháng. - Đúng</p>
-      </body>
-      </html>
-    `;
-    const blob = new Blob(['\ufeff' + docContent], { type: 'application/msword' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'Mau_Ngan_Hang_Cau_Hoi.doc';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+            // [Phần 1]
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "[Phần 1]",
+                  bold: true,
+                  size: 24, // 12pt
+                }),
+              ],
+              spacing: { before: 200, after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Câu 1: Cho hàm số bậc ba $y = ax^3 + bx^2 + cx + d \\ (a \\neq 0)$ có bảng biến thiên sau. Hỏi đồ thị hàm số có bao nhiêu cực trị?",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "A. 2 cực trị", size: 24 })],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "B. 1 cực trị", size: 24 })],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "C. 3 cực trị", size: 24 })],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "D. Có cực đại, không cực tiểu", size: 24 })],
+              spacing: { after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Đáp án: A",
+                  bold: true,
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 300 },
+            }),
+
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Câu 2: Công thức giải nhanh nghiệm phương trình bậc hai $ax^2 + bx + c = 0 \\ (a \\neq 0)$ có biệt thức $\\Delta = b^2 - 4ac > 0$ là:",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "A. $x = \\frac{-b \\pm \\sqrt{\\Delta}}{2a}$", size: 24 })],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "B. $x = \\frac{-b \\pm \\Delta}{2a}$", size: 24 })],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "C. $x = \\frac{b \\pm \\sqrt{\\Delta}}{2a}$", size: 24 })],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "D. x không xác định", size: 24 })],
+              spacing: { after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Đáp án: A",
+                  bold: true,
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 300 },
+            }),
+
+            // [Phần 2]
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "[Phần 2]",
+                  bold: true,
+                  size: 24,
+                }),
+              ],
+              spacing: { before: 200, after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Câu 3: Cho bảng số liệu sau về nhiệt độ trung bình một số tháng tại Thủ đô Hà Nội:",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+
+            // Table
+            new DocxTable({
+              width: {
+                size: 100,
+                type: DocxWidthType.PERCENTAGE,
+              },
+              rows: [
+                // Header
+                new DocxTableRow({
+                  children: [
+                    new DocxTableCell({
+                      children: [
+                        new DocxParagraph({
+                          children: [new DocxTextRun({ text: "Tháng 1", bold: true, size: 24 })],
+                          alignment: "center",
+                        }),
+                      ],
+                      shading: { fill: "F1F5F9" },
+                    }),
+                    new DocxTableCell({
+                      children: [
+                        new DocxParagraph({
+                          children: [new DocxTextRun({ text: "Tháng 6", bold: true, size: 24 })],
+                          alignment: "center",
+                        }),
+                      ],
+                      shading: { fill: "F1F5F9" },
+                    }),
+                    new DocxTableCell({
+                      children: [
+                        new DocxParagraph({
+                          children: [new DocxTextRun({ text: "Tháng 12", bold: true, size: 24 })],
+                          alignment: "center",
+                        }),
+                      ],
+                      shading: { fill: "F1F5F9" },
+                    }),
+                  ],
+                }),
+                // Body
+                new DocxTableRow({
+                  children: [
+                    new DocxTableCell({
+                      children: [
+                        new DocxParagraph({
+                          children: [new DocxTextRun({ text: "$16.4^oC$", size: 24 })],
+                          alignment: "center",
+                        }),
+                      ],
+                    }),
+                    new DocxTableCell({
+                      children: [
+                        new DocxParagraph({
+                          children: [new DocxTextRun({ text: "$29.8^oC$", size: 24 })],
+                          alignment: "center",
+                        }),
+                      ],
+                    }),
+                    new DocxTableCell({
+                      children: [
+                        new DocxParagraph({
+                          children: [new DocxTextRun({ text: "$18.2^oC$", size: 24 })],
+                          alignment: "center",
+                        }),
+                      ],
+                    }),
+                  ],
+                }),
+              ],
+            }),
+
+            new DocxParagraph({
+              children: [new DocxTextRun({ text: "" })],
+              spacing: { before: 120, after: 120 },
+            }),
+
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Xét tính Đúng/Sai của các mệnh đề:",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "a. Tháng 6 có nhiệt độ trung bình cao nhất trong ba tháng kể trên. - Đúng",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "b. Biên độ nhiệt lệch giữa tháng 6 và tháng 1 lớn hơn $15.0^oC$. - Sai",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "c. Nhiệt độ trung bình của tháng 12 mát hơn nhiệt độ mùa hè. - Đúng",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 80 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "d. Nhiệt độ tháng 1 là thấp nhất trong 3 tháng. - Đúng",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+
+            // [Phần 3]
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "[Phần 3]",
+                  bold: true,
+                  size: 24,
+                }),
+              ],
+              spacing: { before: 200, after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Câu 4: Tìm số nghiệm thực của phương trình $x^2 - 4x + 3 = 0$.",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Đáp án: 2",
+                  bold: true,
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 200 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Câu 5: Cho hàm số $y = x^3 - 3x^2 + 1$. Điểm cực đại của đồ thị hàm số có tọa độ cực đại là $(x_0; y_0)$. Tính tổng $x_0 + y_0$.",
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+            new DocxParagraph({
+              children: [
+                new DocxTextRun({
+                  text: "Đáp án: 1",
+                  bold: true,
+                  size: 24,
+                }),
+              ],
+              spacing: { after: 120 },
+            }),
+          ],
+        },
+      ],
+    });
+
+    DocxPacker.toBlob(doc).then((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "Mau_Ngan_Hang_Cau_Hoi.docx";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  };
+
+  // Helper to get formatted folders list for dropdown with indentation
+  const getFolderDropdownList = (foldersList: Folder[]) => {
+    const result: { id: string; name: string; level: number }[] = [];
+    const visit = (pid: string | undefined, level: number) => {
+      const children = foldersList.filter(f => f.parentId === pid);
+      children.forEach(c => {
+        result.push({ id: c.id, name: c.name, level });
+        visit(c.id, level + 1);
+      });
+    };
+    // Add folders without parents first (root folders)
+    const rootFolders = foldersList.filter(f => !f.parentId || !foldersList.some(p => p.id === f.parentId));
+    rootFolders.forEach(rf => {
+      result.push({ id: rf.id, name: rf.name, level: 0 });
+      visit(rf.id, 1);
+    });
+    return result;
+  };
+
+  const getSubfolderIds = (folderId: string, foldersList: Folder[]): string[] => {
+    const children = foldersList.filter(f => f.parentId === folderId);
+    return [
+      folderId,
+      ...children.flatMap(c => getSubfolderIds(c.id, foldersList))
+    ];
+  };
+
+  const getFolderQuestionCount = (folderId: string) => {
+    const allIds = getSubfolderIds(folderId, visibleFolders);
+    return visibleQuestions.filter(q => q.folderId && allIds.includes(q.folderId)).length;
+  };
+
+  const toggleFolderExpanded = (id: string) => {
+    setExpandedFolderIds(prev => ({ ...prev, [id]: !(prev[id] ?? true) }));
   };
 
   const createFolder = () => {
     if (!newFolder.name.trim()) return;
+    const folderType = newFolder.type || "question";
     const folder: Folder = {
       id: Date.now().toString(),
       name: newFolder.name.trim(),
       createdAt: new Date().toISOString(),
-      teacherId: user?.role === "teacher" ? user.sbd : undefined
+      teacherId: user?.role === "teacher" ? user.sbd : undefined,
+      parentId: newFolder.parentId,
+      type: folderType
     };
     setFolders(prev => [...prev, folder]);
     fetch("/api/folders", {
@@ -2983,27 +3394,333 @@ function AdminDashboard({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(folder)
     }).catch(err => console.error("Error creating folder:", err));
-    setNewFolder({ name: "" });
+    setNewFolder({ name: "", parentId: undefined, type: "question" });
     setIsFolderModalOpen(false);
   };
 
   const createStudent = () => {
     if (!newStudent.name.trim() || !newStudent.sbd.trim()) return;
+    const targetSbd = newStudent.sbd.trim();
     const student: Student = {
-      id: newStudent.sbd.trim(),
+      id: targetSbd,
       name: newStudent.name.trim(),
       createdAt: new Date().toISOString(),
       teacherId: user?.role === "teacher" ? user.sbd : undefined,
       className: user?.role === "teacher" ? user.className : (newStudent.className?.trim() || undefined)
     };
-    setStudents(prev => [...prev, student]);
+
+    if (editingStudentId) {
+      if (editingStudentId !== targetSbd) {
+        // SBD changed: Delete the old student ID first
+        setStudents(prev => prev.filter(s => s.id !== editingStudentId));
+        fetch(`/api/students/${editingStudentId}`, { method: "DELETE" })
+          .catch(err => console.error("Error deleting old student ID:", err));
+      }
+
+      setStudents(prev => {
+        const filtered = prev.filter(s => s.id !== editingStudentId);
+        return [...filtered, student];
+      });
+      showToast("Cập nhật thông tin thí sinh thành công!", "success");
+    } else {
+      setStudents(prev => {
+        const filtered = prev.filter(s => s.id !== targetSbd);
+        return [...filtered, student];
+      });
+      showToast("Đã thêm thí sinh mới thành công!", "success");
+    }
+
+    // Upsert student details to the server
     fetch("/api/students", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(student)
-    }).catch(err => console.error("Error creating student:", err));
+    }).catch(err => console.error("Error saving student:", err));
+
     setNewStudent({ name: "", sbd: "", className: "" });
+    setEditingStudentId(null);
     setIsStudentModalOpen(false);
+  };
+
+  const handleBulkDeleteStudents = () => {
+    if (selectedStudentIds.length === 0) return;
+    showConfirm(
+      "Xác nhận xóa nhiều thí sinh",
+      `Bạn có chắc chắn muốn xóa đồng thời ${selectedStudentIds.length} thí sinh đã chọn khỏi danh sách lớp không? Thao tác này sẽ xóa vĩnh viễn khỏi hệ thống!`,
+      () => {
+        setStudents(prev => prev.filter(s => !selectedStudentIds.includes(s.id)));
+        setSelectedStudentIds([]);
+        fetch("/api/students/bulk-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: selectedStudentIds })
+        })
+          .then(res => res.json())
+          .then(data => {
+            if (data.success) {
+              showToast(`Đã xóa thành công ${data.count} thí sinh khỏi hệ thống!`, "success");
+            } else {
+              showToast("Thao tác xóa gặp lỗi trên máy chủ!", "error");
+            }
+          })
+          .catch(err => {
+            console.error(err);
+            showToast("Không kết nối được server để thực hiện xóa!", "error");
+          });
+      }
+    );
+  };
+
+  const downloadExcelTemplate = () => {
+    const sampleData = [
+      { "Số báo danh": "SBD001", "Họ và tên": "Nguyễn Văn Anh", "Lớp": "12A1" },
+      { "Số báo danh": "SBD002", "Họ và tên": "Trần Thị Bình", "Lớp": "12A1" },
+      { "Số báo danh": "SBD003", "Họ và tên": "Lê Hoàng Chinh", "Lớp": "12A2" },
+      { "Số báo danh": "SBD004", "Họ và tên": "Phạm Minh Đức", "Lớp": "12A3" }
+    ];
+
+    const worksheet = XLSX.utils.json_to_sheet(sampleData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Danh sách thí sinh");
+    XLSX.writeFile(workbook, "Mau_danh_sach_thi_sinh.xlsx");
+    showToast("Đã tải xuống file Excel mẫu!", "success");
+  };
+
+  const exportResultsToExcel = () => {
+    try {
+      if (filteredResults.length === 0) {
+        showToast("Không có dữ liệu kết quả nào khớp bộ lọc để xuất file!", "info");
+        return;
+      }
+
+      const workbook = XLSX.utils.book_new();
+
+      // 1. Sheet 1: Thống kê tổng hợp các Lớp
+      const summaryHeader: any[][] = [
+        ["BÁO CÁO THỐNG KÊ KẾT QUẢ ĐIỂM SỐ THEO LỚP"],
+        [`Ngày xuất báo cáo: ${new Date().toLocaleString("vi-VN")}`],
+        [`Bộ lọc lớp: ${resultsClassFilter === "ALL" ? "Tất cả các lớp" : "Lớp " + resultsClassFilter}`],
+        [`Đợt thi / Phòng thi: ${resultsExamFilter === "ALL" ? "Tất cả các đợt" : resultsExamFilter}`],
+        [], // Dòng trống phân cách
+        [
+          "STT", 
+          "Lớp học", 
+          "Số bài đã nộp", 
+          "Điểm trung bình", 
+          "Điểm cao nhất", 
+          "Điểm thấp nhất", 
+          "Đạt Giỏi (≥ 8.0)", 
+          "Đạt Khá (6.5 - 7.9)", 
+          "Đạt Trung Bình (5.0 - 6.4)", 
+          "Đạt Yếu (< 5.0)"
+        ]
+      ];
+
+      classStats.forEach((group, index) => {
+        summaryHeader.push([
+          index + 1,
+          group.className,
+          group.submissions.length,
+          Math.round(group.average * 100) / 100,
+          group.max,
+          group.min,
+          group.gioi,
+          group.kha,
+          group.tb,
+          group.yeu
+        ]);
+      });
+
+      const summaryWorksheet = XLSX.utils.aoa_to_sheet(summaryHeader);
+      
+      // Định dạng độ rộng cột cho Sheet 1
+      summaryWorksheet["!cols"] = [
+        { wch: 8 },   // STT
+        { wch: 16 },  // Lớp học
+        { wch: 16 },  // Số bài nộp
+        { wch: 18 },  // TB lớp
+        { wch: 16 },  // Điểm Max
+        { wch: 16 },  // Điểm Min
+        { wch: 20 },  // Giỏi
+        { wch: 20 },  // Khá
+        { wch: 22 },  // Trung bình
+        { wch: 18 }   // Yếu
+      ];
+
+      XLSX.utils.book_append_sheet(workbook, summaryWorksheet, "Thống kê tổng hợp Lớp");
+
+      // 2. Sheet 2: Danh sách chi tiết học lực của thí sinh
+      const detailsHeader: any[][] = [
+        ["DANH SÁCH BẢNG ĐIỂM CHI TIẾT TỪNG THÍ SINH"],
+        [`Ngày xuất báo cáo: ${new Date().toLocaleString("vi-VN")}`],
+        [`Lớp học: ${resultsClassFilter === "ALL" ? "Tất cả" : "Lớp " + resultsClassFilter}`],
+        [`Đề thi / Phòng thi: ${resultsExamFilter === "ALL" ? "Tất cả phòng" : resultsExamFilter}`],
+        [], // Dòng trống phân cách
+        [
+          "STT", 
+          "Số báo danh (SBD)", 
+          "Họ và tên thí sinh", 
+          "Lớp quản lý", 
+          "Đề thi / Phòng thi", 
+          "Điểm Phần I", 
+          "Điểm Phần II", 
+          "Điểm Phần III", 
+          "Tổng điểm cuối cùng", 
+          "Thời gian nộp bài"
+        ]
+      ];
+
+      filteredResults.forEach((res, index) => {
+        const studentObj = students.find(s => s.id === res.studentId);
+        detailsHeader.push([
+          index + 1,
+          res.studentId,
+          res.studentName,
+          studentObj?.className || "Tự do / Chung",
+          res.examName || "Đợt thi tự do",
+          res.part1Score !== undefined ? res.part1Score : "-",
+          res.part2Score !== undefined ? res.part2Score : "-",
+          res.part3Score !== undefined ? res.part3Score : "-",
+          res.score,
+          new Date(res.timestamp).toLocaleString("vi-VN")
+        ]);
+      });
+
+      const detailsWorksheet = XLSX.utils.aoa_to_sheet(detailsHeader);
+      
+      // Định dạng độ rộng cột cho Sheet 2
+      detailsWorksheet["!cols"] = [
+        { wch: 8 },   // STT
+        { wch: 18 },  // SBD
+        { wch: 26 },  // Họ tên
+        { wch: 16 },  // Lớp
+        { wch: 32 },  // Phòng thi
+        { wch: 16 },  // Phần I
+        { wch: 16 },  // Phần II
+        { wch: 16 },  // Phần III
+        { wch: 20 },  // Tổng điểm
+        { wch: 22 }   // Thời gian nộp
+      ];
+
+      XLSX.utils.book_append_sheet(workbook, detailsWorksheet, "Chi tiết điểm thí sinh");
+
+      // Set filename based on current filters
+      let filename = "Bao_cao_thong_ke_diem_so";
+      if (resultsClassFilter !== "ALL") {
+        filename += `_Lop_${resultsClassFilter}`;
+      }
+      if (resultsExamFilter !== "ALL") {
+        filename += `_PhongThi_${resultsExamFilter}`;
+      }
+      filename += `_${new Date().toISOString().split("T")[0]}.xlsx`;
+
+      XLSX.writeFile(workbook, filename);
+      showToast(`Đã xuất báo cáo Excel thành công: ${filename}`, "success");
+    } catch (error) {
+      console.error("Lỗi khi xuất file Excel:", error);
+      showToast("Gặp lỗi trong quá trình khởi tạo và tải file Excel!", "error");
+    }
+  };
+
+  const handleExcelImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = new Uint8Array(event.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: "array" });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const json: any[] = XLSX.utils.sheet_to_json(worksheet);
+
+        if (!json || json.length === 0) {
+          showToast("Tệp Excel trống hoặc không đúng định dạng!", "error");
+          return;
+        }
+
+        const parsedStudents: Student[] = [];
+        let errorCount = 0;
+
+        for (const row of json) {
+          const normalizedRow: any = {};
+          Object.keys(row).forEach(key => {
+            normalizedRow[String(key).trim().toLowerCase()] = row[key];
+          });
+
+          const rawSbd = normalizedRow["số báo danh"] || normalizedRow["sbd"] || normalizedRow["id"] || normalizedRow["mã số"] || normalizedRow["sỡ báo danh"];
+          const rawName = normalizedRow["họ và tên"] || normalizedRow["họ tên"] || normalizedRow["tên"] || normalizedRow["name"] || normalizedRow["họ tên thí sinh"];
+          const rawClass = normalizedRow["lớp"] || normalizedRow["class"] || normalizedRow["classname"] || normalizedRow["lớp quản lý"];
+
+          if (rawSbd && rawName) {
+            parsedStudents.push({
+              id: String(rawSbd).trim(),
+              name: String(rawName).trim(),
+              createdAt: new Date().toISOString(),
+              teacherId: user?.role === "teacher" ? user.sbd : undefined,
+              className: rawClass ? String(rawClass).trim() : (user?.role === "teacher" ? user.className : undefined)
+            });
+          } else {
+            errorCount++;
+          }
+        }
+
+        if (parsedStudents.length === 0) {
+          showToast("Không tìm thấy dữ liệu thí sinh hợp lệ (Phải có thông số 'Họ và tên' và 'Số báo danh').", "error");
+          return;
+        }
+
+        setExcelPreviewStudents(parsedStudents);
+        setExcelImportErrors(errorCount);
+        showToast(`Đã đọc thành công ${parsedStudents.length} thí sinh từ file!`, "success");
+      } catch (err) {
+        console.error("Error reading Excel file:", err);
+        showToast("Có lỗi xảy ra khi đọc file Excel!", "error");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const confirmExcelImport = () => {
+    if (excelPreviewStudents.length === 0) return;
+
+    const folderIdToSet = excelSelectedFolderId || undefined;
+    const mappedStudents = excelPreviewStudents.map(s => ({
+      ...s,
+      folderId: folderIdToSet
+    }));
+
+    setStudents(prev => {
+      const studentMap = new Map(prev.map(s => [s.id, s]));
+      mappedStudents.forEach(s => {
+        studentMap.set(s.id, s);
+      });
+      return Array.from(studentMap.values());
+    });
+
+    fetch("/api/students", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mappedStudents)
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          showToast(`Đã nhập thành công ${mappedStudents.length} thí sinh vào hệ thống!`, "success");
+        } else {
+          showToast("Có lỗi xảy ra khi lưu danh sách vào database!", "error");
+        }
+      })
+      .catch(err => {
+        console.error("Error committing Excel students:", err);
+        showToast("Không thể kết nối tới máy chủ!", "error");
+      });
+
+    setIsExcelImportModalOpen(false);
+    setExcelPreviewStudents([]);
+    setExcelImportErrors(0);
+    setExcelSelectedFolderId("");
   };
 
   const handleStartEditExamRoom = (room: ExamRoom) => {
@@ -3020,9 +3737,11 @@ function AdminDashboard({
       part2Point2: room.part2Point2 ?? 0.25,
       part2Point3: room.part2Point3 ?? 0.5,
       part2Point4: room.part2Point4 ?? 1.0,
-      part3Point: room.part3Point ?? 0.25,
+      part3Point: room.part3Point ?? 0.5,
       allowReview: room.allowReview ?? true,
-      isFree: room.isFree ?? false
+      isFree: room.isFree ?? false,
+      shuffleQuestions: room.shuffleQuestions ?? false,
+      shuffleAnswers: room.shuffleAnswers ?? false
     });
     setIsExamModalOpen(true);
   };
@@ -3042,9 +3761,11 @@ function AdminDashboard({
       part2Point2: 0.25,
       part2Point3: 0.5,
       part2Point4: 1.0,
-      part3Point: 0.25,
+      part3Point: 0.5,
       allowReview: true,
-      isFree: false
+      isFree: false,
+      shuffleQuestions: false,
+      shuffleAnswers: false
     });
     setRandomSelectFolderId("ALL");
     setRandomSelectPart1Count(0);
@@ -3070,10 +3791,12 @@ function AdminDashboard({
       part2Point2: Number(newExam.part2Point2) || 0.25,
       part2Point3: Number(newExam.part2Point3) || 0.5,
       part2Point4: Number(newExam.part2Point4) || 1.0,
-      part3Point: Number(newExam.part3Point) || 0.25,
+      part3Point: Number(newExam.part3Point) || 0.5,
       allowReview: newExam.allowReview,
       teacherId: user?.role === "teacher" ? user.sbd : undefined,
-      isFree: newExam.isFree
+      isFree: newExam.isFree,
+      shuffleQuestions: newExam.shuffleQuestions,
+      shuffleAnswers: newExam.shuffleAnswers
     };
     if (editingExamRoomId) {
       setExamRooms(prev => prev.map(r => r.id === editingExamRoomId ? exam : r));
@@ -3102,9 +3825,11 @@ function AdminDashboard({
       part2Point2: 0.25,
       part2Point3: 0.5,
       part2Point4: 1.0,
-      part3Point: 0.25,
+      part3Point: 0.5,
       allowReview: true,
-      isFree: false
+      isFree: false,
+      shuffleQuestions: false,
+      shuffleAnswers: false
     });
     setEditingExamRoomId(null);
     // Reset random selection parameters on creation
@@ -3163,6 +3888,14 @@ function AdminDashboard({
     return folders;
   }, [folders, user]);
 
+  const questionFolders = useMemo(() => {
+    return visibleFolders.filter(f => !f.type || f.type === 'question');
+  }, [visibleFolders]);
+
+  const studentFolders = useMemo(() => {
+    return visibleFolders.filter(f => f.type === 'student');
+  }, [visibleFolders]);
+
   const visibleQuestions = useMemo(() => {
     if (user?.role === "teacher") {
       return questions.filter(q => q.teacherId === user.sbd);
@@ -3190,6 +3923,14 @@ function AdminDashboard({
     return students;
   }, [students, user]);
 
+  const filteredStudents = useMemo(() => {
+    return visibleStudents.filter(s => {
+      if (studentFolderFilter === "ALL") return true;
+      if (studentFolderFilter === "NONE") return !s.folderId;
+      return s.folderId === studentFolderFilter;
+    });
+  }, [visibleStudents, studentFolderFilter]);
+
   const visibleResults = useMemo(() => {
     if (user?.role === "teacher") {
       const classStudentIds = new Set(visibleStudents.map(s => s.id));
@@ -3197,6 +3938,80 @@ function AdminDashboard({
     }
     return results;
   }, [results, visibleStudents, user]);
+
+  const classStats = useMemo(() => {
+    const classGroups: Record<string, {
+      className: string;
+      submissions: typeof visibleResults;
+      totalScore: number;
+      average: number;
+      max: number;
+      min: number;
+      gioi: number;
+      kha: number;
+      tb: number;
+      yeu: number;
+    }> = {};
+
+    visibleResults.forEach(r => {
+      const student = students.find(s => s.id === r.studentId);
+      const clsName = student?.className?.trim() || "Tự do";
+      
+      if (!classGroups[clsName]) {
+        classGroups[clsName] = {
+          className: clsName,
+          submissions: [],
+          totalScore: 0,
+          average: 0,
+          max: -1,
+          min: 11,
+          gioi: 0,
+          kha: 0,
+          tb: 0,
+          yeu: 0,
+        };
+      }
+
+      const group = classGroups[clsName];
+      group.submissions.push(r);
+      group.totalScore += r.score;
+      if (r.score > group.max) group.max = r.score;
+      if (r.score < group.min) group.min = r.score;
+
+      if (r.score >= 8.0) {
+        group.gioi++;
+      } else if (r.score >= 6.5) {
+        group.kha++;
+      } else if (r.score >= 5.0) {
+        group.tb++;
+      } else {
+        group.yeu++;
+      }
+    });
+
+    return Object.values(classGroups).map(group => {
+      return {
+        ...group,
+        average: group.submissions.length > 0 ? (group.totalScore / group.submissions.length) : 0,
+        min: group.min === 11 ? 0 : group.min,
+        max: group.max === -1 ? 0 : group.max,
+      };
+    }).sort((a, b) => a.className.localeCompare(b.className));
+  }, [visibleResults, students]);
+
+  const filteredResults = useMemo(() => {
+    return visibleResults.filter(r => {
+      if (resultsClassFilter !== "ALL") {
+        const student = students.find(s => s.id === r.studentId);
+        const clsName = student?.className?.trim() || "Tự do";
+        if (clsName !== resultsClassFilter) return false;
+      }
+      if (resultsExamFilter !== "ALL") {
+        if (r.examId !== resultsExamFilter) return false;
+      }
+      return true;
+    });
+  }, [visibleResults, students, resultsClassFilter, resultsExamFilter]);
 
   const visibleExams = useMemo(() => {
     if (user?.role === "teacher") {
@@ -3286,9 +4101,37 @@ function AdminDashboard({
               </button>
             )}
             {activeTab === "students" && (
-              <button onClick={() => setIsStudentModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-xl flex items-center gap-1.5 hover:bg-indigo-700 font-bold text-sm transition-colors shadow-sm">
-                <Plus size={16} /> Thêm thí sinh
-              </button>
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => {
+                    setNewFolder({ name: "", parentId: undefined, type: "student" });
+                    setIsFolderModalOpen(true);
+                  }}
+                  className="bg-amber-600 text-white px-4 py-2 rounded-xl flex items-center gap-1.5 hover:bg-amber-700 font-bold text-sm transition-colors shadow-sm cursor-pointer"
+                >
+                  <FolderIcon size={16} /> Thêm thư mục lớp
+                </button>
+                <button 
+                  onClick={() => {
+                    setEditingStudentId(null);
+                    setNewStudent({ name: "", sbd: "", className: "" });
+                    setIsStudentModalOpen(true);
+                  }} 
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-xl flex items-center gap-1.5 hover:bg-indigo-700 font-bold text-sm transition-colors shadow-sm cursor-pointer"
+                >
+                  <Plus size={16} /> Thêm thủ công
+                </button>
+                <button 
+                  onClick={() => {
+                    setExcelPreviewStudents([]);
+                    setExcelImportErrors(0);
+                    setIsExcelImportModalOpen(true);
+                  }} 
+                  className="bg-emerald-600 text-white px-4 py-2 rounded-xl flex items-center gap-1.5 hover:bg-emerald-700 font-bold text-sm transition-colors shadow-sm cursor-pointer"
+                >
+                  <Upload size={16} /> Nhập từ Excel
+                </button>
+              </div>
             )}
             {activeTab === "exams" && (
               <button 
@@ -3306,9 +4149,11 @@ function AdminDashboard({
                     part2Point2: 0.25,
                     part2Point3: 0.5,
                     part2Point4: 1.0,
-                    part3Point: 0.25,
+                    part3Point: 0.5,
                     allowReview: true,
-                    isFree: false
+                    isFree: false,
+                    shuffleQuestions: false,
+                    shuffleAnswers: false
                   });
                   setIsExamModalOpen(true);
                 }} 
@@ -3353,47 +4198,120 @@ function AdminDashboard({
           </div>
         )}
 
-        {activeTab === "folders" && (
-          <div className="space-y-6">
-            {visibleFolders.length === 0 ? (
-              <div className="text-center bg-white p-12 border border-gray-200 rounded-2xl">
-                <FolderIcon className="mx-auto text-gray-300 mb-3" size={48} />
-                <p className="text-sm font-semibold text-gray-600">Chưa khai báo chủ đề/thư mục nào</p>
-                <p className="text-xs text-gray-400 mt-1">Sử dụng nút "Thêm thư mục" ở góc phải để phân loại ngân hàng câu hỏi của bạn.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {visibleFolders.map(folder => (
-                  <div key={folder.id} className="bg-white p-4 rounded-xl border border-gray-200 flex items-center gap-3 hover:shadow-sm transition-all">
-                    <FolderIcon className="text-amber-500 fill-amber-500/10" size={24} />
+        {activeTab === "folders" && (() => {
+          const topLevelFolders = questionFolders.filter(f => !f.parentId || !questionFolders.some(p => p.id === f.parentId));
+          const renderFolderNode = (folder: Folder, depth = 0) => {
+            const children = questionFolders.filter(f => f.parentId === folder.id);
+            const hasChildren = children.length > 0;
+            const isExpanded = expandedFolderIds[folder.id] ?? true; // Default to expanded
+            
+            const directQuestionCount = visibleQuestions.filter(q => q.folderId === folder.id).length;
+            const totalQuestionCount = getFolderQuestionCount(folder.id);
+            return (
+              <div key={folder.id} className="space-y-2">
+                {/* Folder Row */}
+                <div 
+                  className={cn(
+                    "group bg-white p-3.5 rounded-xl border border-gray-150 flex items-center justify-between gap-3 transition-all hover:bg-gray-50/50 hover:shadow-2xs",
+                    depth > 0 && "relative"
+                  )}
+                >
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    {hasChildren ? (
+                      <button 
+                        onClick={() => toggleFolderExpanded(folder.id)}
+                        className="p-1 hover:bg-gray-150 rounded text-gray-500 cursor-pointer focus:outline-hidden transition-transform duration-200"
+                        style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)" }}
+                      >
+                        <ChevronRight size={14} />
+                      </button>
+                    ) : (
+                      <div className="w-6 shrink-0" />
+                    )}
+                    
+                    <FolderIcon className="text-amber-500 fill-amber-500/10 shrink-0" size={18} />
+                    
                     <div className="flex-1 min-w-0">
-                      <p className="font-bold text-gray-900 truncate text-sm">{folder.name}</p>
-                      <p className="text-xs text-gray-500">
-                        {visibleQuestions.filter(q => q.folderId === folder.id).length} câu hỏi
-                      </p>
+                      <span className="font-bold text-gray-900 text-xs sm:text-sm truncate block">{folder.name}</span>
+                      <span className="text-[10px] text-gray-500 flex flex-wrap items-center gap-1.5 mt-0.5 font-semibold">
+                        <span>{directQuestionCount} câu hỏi trực tiếp</span>
+                        {totalQuestionCount > directQuestionCount && (
+                          <>
+                            <span className="text-gray-300">•</span>
+                            <span className="text-indigo-650 bg-indigo-50/70 px-1 rounded-md">{totalQuestionCount} tổng cộng (gồm mục con)</span>
+                          </>
+                        )}
+                      </span>
                     </div>
+                  </div>
+                  <div className="flex items-center gap-1 bg-gray-50 px-1.5 py-0.5 rounded-lg border border-gray-100 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity whitespace-nowrap">
+                    <button
+                      onClick={() => {
+                        setNewFolder({ name: "", parentId: folder.id, type: "question" });
+                        setIsFolderModalOpen(true);
+                      }}
+                      title="Thêm thư mục con"
+                      className="p-1 text-indigo-650 hover:bg-indigo-100 rounded cursor-pointer transition-colors"
+                    >
+                      <Plus size={14} />
+                    </button>
                     <button 
                       onClick={() => {
                         showConfirm(
                           "Xóa thư mục / chủ đề",
                           `Bạn có chắc chắn muốn xóa thư mục "${folder.name}" không? Thao tác này chỉ xóa danh mục, các câu hỏi bên trong vẫn được giữ lại và chuyển về trạng thái không phân loại.`,
                           () => {
-                            setFolders(prev => prev.filter(f => f.id !== folder.id));
+                            setFolders(prev => prev.filter(f => f.id !== folder.id).map(f => {
+                              if (f.parentId === folder.id) {
+                                return { ...f, parentId: undefined };
+                              }
+                              return f;
+                            }));
                             fetch(`/api/folders/${folder.id}`, { method: "DELETE" }).catch(err => console.error(err));
                             showToast("Đã xóa thư mục thành công!", "success");
                           }
                         );
                       }} 
-                      className="text-gray-400 hover:text-red-600 p-1 rounded hover:bg-red-50 transition-colors cursor-pointer"
+                      title="Xóa thư mục này"
+                      className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded cursor-pointer transition-colors"
                     >
-                      <Trash2 size={16} />
+                      <Trash2 size={14} />
                     </button>
                   </div>
-                ))}
+                </div>
+                {/* Subfolders Block */}
+                {hasChildren && isExpanded && (
+                  <div className="pl-4 sm:pl-6 border-l border-dashed border-gray-200 space-y-2 mt-2">
+                    {children.map(child => renderFolderNode(child, depth + 1))}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        )}
+            );
+          };
+          return (
+            <div className="space-y-6">
+              {questionFolders.length === 0 ? (
+                <div className="text-center bg-white p-12 border border-gray-200 rounded-2xl">
+                  <FolderIcon className="mx-auto text-gray-300 mb-3" size={48} />
+                  <p className="text-sm font-semibold text-gray-600">Chưa khai báo chủ đề/thư mục nào</p>
+                  <p className="text-xs text-gray-400 mt-1">Sử dụng nút "Thêm thư mục" ở góc phải để phân loại ngân hàng câu hỏi của bạn.</p>
+                </div>
+              ) : (
+                <div className="bg-gray-50/30 border border-gray-150 p-4 sm:p-6 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-black uppercase text-gray-400 tracking-wider">Cấu trúc thư mục chủ đề</p>
+                    <span className="text-[10px] text-gray-500 font-bold bg-white border border-gray-150 px-2 py-0.5 rounded-full">
+                      {questionFolders.length} danh mục
+                    </span>
+                  </div>
+                  <div className="space-y-3">
+                    {topLevelFolders.map(folder => renderFolderNode(folder))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {activeTab === "questions" && (() => {
           const areAllFilteredSelected = filteredQuestions.length > 0 && filteredQuestions.every(q => selectedQuestionIds.includes(q.id));
@@ -3431,8 +4349,10 @@ function AdminDashboard({
                   >
                     <option value="ALL">Toàn bộ thư mục chủ đề</option>
                     <option value="NONE">[ Không thuộc thư mục ]</option>
-                    {visibleFolders.map(f => (
-                      <option key={f.id} value={f.id}>📁 {f.name}</option>
+                    {getFolderDropdownList(questionFolders).map(f => (
+                      <option key={f.id} value={f.id}>
+                        {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                      </option>
                     ))}
                   </select>
                 </div>
@@ -3583,60 +4503,178 @@ function AdminDashboard({
           );
         })()}
 
-        {activeTab === "students" && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <table className="w-full text-left">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Số báo danh</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Họ và tên thí sinh</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Lớp quản lý</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Ngày thêm vào danh sách</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase text-right">Thao tác</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 text-sm">
-                {visibleStudents.map(student => (
-                  <tr key={student.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 font-mono font-bold text-indigo-600">{student.id}</td>
-                    <td className="px-6 py-4 font-semibold text-gray-800">{student.name}</td>
-                    <td className="px-6 py-4">
-                      <span className="px-2.5 py-1 text-xs font-bold rounded-lg bg-indigo-50 text-indigo-700 uppercase">
-                        {student.className || "Tự do / Chung"}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-xs text-gray-500">{new Date(student.createdAt).toLocaleDateString('vi-VN')}</td>
-                    <td className="px-6 py-4 text-right">
-                      <button 
-                        onClick={() => {
-                          showConfirm(
-                            "Xóa thí sinh",
-                            `Bạn có chắc chắn muốn xóa thí sinh "${student.name}" (SBD: ${student.id}) khỏi danh sách lớp không?`,
-                            () => {
-                              setStudents(prev => prev.filter(s => s.id !== student.id));
-                              fetch(`/api/students/${student.id}`, { method: "DELETE" }).catch(err => console.error(err));
-                              showToast("Đã xóa thí sinh thành công!", "success");
+        {activeTab === "students" && (() => {
+          const areAllFilteredSelected = filteredStudents.length > 0 && filteredStudents.every(s => selectedStudentIds.includes(s.id));
+          const areSomeFilteredSelected = filteredStudents.some(s => selectedStudentIds.includes(s.id)) && !areAllFilteredSelected;
+
+          return (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-white p-4 rounded-xl border border-gray-150">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-gray-400 uppercase">Thư mục quản lý:</span>
+                  <select 
+                    value={studentFolderFilter}
+                    onChange={(e) => {
+                      setStudentFolderFilter(e.target.value);
+                      setSelectedStudentIds([]);
+                    }}
+                    className="px-3 py-1.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 bg-white font-semibold min-w-[200px]"
+                  >
+                    <option value="ALL">Tất cả thư mục lớp học</option>
+                    <option value="NONE">[ Chưa phân thư mục ]</option>
+                    {getFolderDropdownList(studentFolders).map(f => (
+                      <option key={f.id} value={f.id}>
+                        {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {selectedStudentIds.length > 0 && (
+                <div className="bg-rose-50 border border-rose-150 p-3.5 rounded-xl flex items-center justify-between animate-fadeIn text-sm">
+                  <div className="flex items-center gap-2 text-rose-800 font-semibold text-left">
+                    <AlertCircle size={16} className="text-rose-600" />
+                    <span>Đã chọn <strong className="text-rose-700 bg-rose-200/50 px-2 py-0.5 rounded-md">{selectedStudentIds.length}</strong> thí sinh</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setSelectedStudentIds([])}
+                      className="px-3 py-1.5 bg-white border border-gray-200 text-gray-650 rounded-lg hover:bg-gray-50 flex items-center gap-1 font-semibold text-xs transition-colors cursor-pointer"
+                    >
+                      Hủy chọn
+                    </button>
+                    <button
+                      onClick={handleBulkDeleteStudents}
+                      className="px-3 py-1.5 bg-rose-650 hover:bg-rose-700 text-white rounded-lg flex items-center gap-1 font-bold text-xs transition-colors shadow-sm cursor-pointer"
+                    >
+                      <Trash2 size={14} /> Xóa đồng thời ({selectedStudentIds.length}) thí sinh
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                <table className="w-full text-left">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="px-6 py-3.5 text-center w-12">
+                        <input 
+                          type="checkbox"
+                          checked={areAllFilteredSelected}
+                          ref={(el) => {
+                            if (el) {
+                              el.indeterminate = areSomeFilteredSelected;
                             }
-                          );
-                        }} 
-                        className="text-red-600 hover:underline text-xs font-bold cursor-pointer"
+                          }}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              const toAdd = filteredStudents.map(s => s.id);
+                              setSelectedStudentIds(prev => Array.from(new Set([...prev, ...toAdd])));
+                            } else {
+                              const toRemove = new Set(filteredStudents.map(s => s.id));
+                              setSelectedStudentIds(prev => prev.filter(id => !toRemove.has(id)));
+                            }
+                          }}
+                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 cursor-pointer"
+                        />
+                      </th>
+                      <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Số báo danh</th>
+                      <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Họ và tên thí sinh</th>
+                      <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Lớp và Thư mục</th>
+                      <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Ngày thêm vào danh sách</th>
+                      <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase text-right">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200 text-sm">
+                    {filteredStudents.map(student => (
+                      <tr 
+                        key={student.id} 
+                        className={cn(
+                          "hover:bg-gray-50 transition-colors", 
+                          selectedStudentIds.includes(student.id) && "bg-indigo-50/20"
+                        )}
                       >
-                        Xóa
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {students.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="text-center py-8 text-gray-400 text-xs text-gray-500">
-                      Chưa có thí sinh nào trong lớp. Vui lòng nhấn "Thêm thí sinh" để bắt đầu thiết lập.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
+                        <td className="px-6 py-4 text-center w-12">
+                          <input 
+                            type="checkbox" 
+                            checked={selectedStudentIds.includes(student.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedStudentIds(prev => [...prev, student.id]);
+                              } else {
+                                setSelectedStudentIds(prev => prev.filter(id => id !== student.id));
+                              }
+                            }}
+                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4 cursor-pointer"
+                          />
+                        </td>
+                        <td className="px-6 py-4 font-mono font-bold text-indigo-600">{student.id}</td>
+                        <td className="px-6 py-4 font-semibold text-gray-800">{student.name}</td>
+                        <td className="px-6 py-4">
+                          <span className="px-2.5 py-1 text-xs font-bold rounded-lg bg-indigo-50 text-indigo-700 uppercase">
+                            {student.className || "Tự do / Chung"}
+                          </span>
+                          {(() => {
+                            const sFolder = folders.find(f => f.id === student.folderId);
+                            return sFolder ? (
+                              <span className="ml-2 px-2 py-0.5 text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-md inline-flex items-center gap-0.5">
+                                📁 {sFolder.name}
+                              </span>
+                            ) : null;
+                          })()}
+                        </td>
+                        <td className="px-6 py-4 text-xs text-gray-500">{new Date(student.createdAt).toLocaleDateString('vi-VN')}</td>
+                        <td className="px-6 py-4 text-right whitespace-nowrap">
+                          <div className="flex justify-end items-center gap-3">
+                            <button 
+                              onClick={() => {
+                                setEditingStudentId(student.id);
+                                setNewStudent({
+                                  name: student.name,
+                                  sbd: student.id,
+                                  className: student.className || ""
+                                });
+                                setIsStudentModalOpen(true);
+                              }} 
+                              className="text-indigo-600 hover:text-indigo-800 hover:underline text-xs font-bold cursor-pointer inline-flex items-center gap-1 bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-100 transition-colors"
+                            >
+                              <Edit3 size={11} /> Sửa
+                            </button>
+                            <button 
+                              onClick={() => {
+                                showConfirm(
+                                  "Xóa thí sinh",
+                                  `Bạn có chắc chắn muốn xóa thí sinh "${student.name}" (SBD: ${student.id}) khỏi danh sách lớp không?`,
+                                  () => {
+                                    setStudents(prev => prev.filter(s => s.id !== student.id));
+                                    setSelectedStudentIds(prev => prev.filter(id => id !== student.id));
+                                    fetch(`/api/students/${student.id}`, { method: "DELETE" }).catch(err => console.error(err));
+                                    showToast("Đã xóa thí sinh thành công!", "success");
+                                  }
+                                );
+                              }} 
+                              className="text-red-600 hover:text-red-800 hover:underline text-xs font-bold cursor-pointer inline-flex items-center gap-1 bg-red-50 px-2.5 py-1 rounded-lg border border-red-100 transition-colors"
+                            >
+                              <Trash2 size={11} /> Xóa
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {filteredStudents.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="text-center py-8 text-gray-400 text-xs">
+                          Không có thí sinh nào trong thư mục lựa chọn. Vui lòng bấm "Thêm thí sinh" để bắt đầu thiết lập.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
 
         {activeTab === "exams" && (
           <div className="space-y-6">
@@ -3691,7 +4729,7 @@ function AdminDashboard({
                         </div>
                         <div className="flex justify-between">
                           <span className="text-gray-500">Phần III (Trả lời ngắn):</span>
-                          <span className="font-bold text-gray-700 font-mono">+{room.part3Point ?? 0.25} đ/câu</span>
+                          <span className="font-bold text-gray-700 font-mono">+{room.part3Point ?? 0.5} đ/câu</span>
                         </div>
                       </div>
 
@@ -3772,77 +4810,350 @@ function AdminDashboard({
         )}
 
         {activeTab === "results" && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <table className="w-full text-left">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Thí sinh</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">SBD</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Tổng Điểm</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Thời gian nộp</th>
-                  <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase text-right">Chi tiết</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 text-sm">
-                {visibleResults.map(result => (
-                  <tr key={result.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 font-semibold text-gray-850">{result.studentName}</td>
-                    <td className="px-6 py-4 font-mono text-gray-600">{result.studentId}</td>
-                    <td className="px-6 py-4 font-mono font-black text-indigo-600">{result.score.toFixed(2)}</td>
-                    <td className="px-6 py-4 text-xs text-gray-500">{new Date(result.timestamp).toLocaleString('vi-VN')}</td>
-                    <td className="px-6 py-4 text-right flex items-center justify-end gap-2.5">
-                      <button 
-                        onClick={() => {
-                          if (onViewResultDetail) {
-                            onViewResultDetail(result);
+          <div className="space-y-6">
+            {/* Collapse button & Thống kê toàn cục */}
+            <div className="bg-white border border-gray-150 rounded-xl p-5 shadow-sm text-left">
+              <div className="flex justify-between items-center pb-3 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <BarChart2 className="text-indigo-600" size={20} />
+                  <span className="text-sm font-black text-gray-800 uppercase tracking-wider font-sans">📊 Thống kê Phân tích Điểm số theo Lớp</span>
+                </div>
+                <button 
+                  onClick={() => setIsStatsExpanded(!isStatsExpanded)}
+                  className="px-3 py-1 bg-gray-50 border border-gray-200 text-xs font-bold rounded-lg hover:bg-gray-100 transition-colors flex items-center gap-1 cursor-pointer text-gray-650"
+                >
+                  {isStatsExpanded ? (
+                    <>Thu gọn <ChevronUp size={14} /></>
+                  ) : (
+                    <>Mở rộng thống kê <ChevronDown size={14} /></>
+                  )}
+                </button>
+              </div>
+
+              {isStatsExpanded && (
+                <div className="mt-4 space-y-6">
+                  {/* General summary metrics */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-indigo-50/40 border border-indigo-100 p-4 rounded-xl flex items-center gap-4">
+                      <div className="p-3 bg-indigo-500 text-white rounded-lg">
+                        <Users size={20} />
+                      </div>
+                      <div>
+                        <span className="text-xs text-gray-400 block font-bold uppercase">Tổng số bài nộp</span>
+                        <span className="text-2xl font-black text-indigo-700">{visibleResults.length} bài</span>
+                      </div>
+                    </div>
+                    
+                    <div className="bg-emerald-50/45 border border-emerald-100 p-4 rounded-xl flex items-center gap-4">
+                      <div className="p-3 bg-emerald-500 text-white rounded-lg">
+                        <TrendingUp size={20} />
+                      </div>
+                      <div>
+                        <span className="text-xs text-gray-400 block font-bold uppercase">Điểm trung bình</span>
+                        <span className="text-2xl font-black text-emerald-700">
+                          {visibleResults.length > 0 
+                            ? (visibleResults.reduce((acc, r) => acc + r.score, 0) / visibleResults.length).toFixed(2)
+                            : "0.00"
                           }
-                        }}
-                        className="text-indigo-650 hover:bg-indigo-50 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
-                      >
-                        Xem bài làm
-                      </button>
-                      <button 
-                        onClick={() => {
-                          showConfirm(
-                            "Xóa kết quả bài làm",
-                            `Bạn có chắc chắn muốn xóa bài làm của thí sinh "${result.studentName}" (SBD: ${result.studentId}, Điểm: ${result.score.toFixed(2)}) không? Thao tác này không thể hoàn tác.`,
-                            () => {
-                              if (setResults) {
-                                setResults(prev => prev.filter(r => r.id !== result.id));
-                              }
-                              fetch(`/api/results/${result.id}`, { method: "DELETE" })
-                                .then(res => res.json())
-                                .then(data => {
-                                  if (data.success) {
-                                    showToast("Đã xóa bài làm của thí sinh thành công!", "success");
-                                  } else {
-                                    showToast("Có lỗi xảy ra khi xóa bài làm!", "error");
-                                  }
-                                })
-                                .catch(err => {
-                                  console.error(err);
-                                  showToast("Lỗi kết nối máy chủ!", "error");
-                                });
-                            }
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="bg-amber-50/45 border border-amber-100 p-4 rounded-xl flex items-center gap-4">
+                      <div className="p-3 bg-amber-500 text-white rounded-lg">
+                        <Award size={20} />
+                      </div>
+                      <div>
+                        <span className="text-xs text-gray-400 block font-bold uppercase">Điểm cao nhất</span>
+                        {(() => {
+                          const top_student = visibleResults.length > 0 
+                            ? visibleResults.reduce((max, r) => r.score > max.score ? r : max, visibleResults[0]) 
+                            : null;
+                          return top_student ? (
+                            <div className="leading-tight">
+                              <span className="text-xl font-black text-amber-700 block">{top_student.score.toFixed(2)} đ</span>
+                              <span className="text-[10px] font-bold text-amber-600 block truncate max-w-[200px]" title={top_student.studentName}>
+                                {top_student.studentName} ({top_student.studentId})
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-xl font-black text-amber-700">0.00 đ</span>
                           );
-                        }}
-                        className="p-1.5 text-gray-400 hover:text-red-650 hover:bg-red-50 rounded-lg transition-all cursor-pointer"
-                        title="Xóa bài làm"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {visibleResults.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="text-center py-8 text-gray-400 text-xs">
-                      Chưa có lượt nộp bài nào được ghi nhận trên hệ thống.
-                    </td>
-                  </tr>
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Per Class cards breakdown */}
+                  {classStats.length > 0 ? (
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                      {classStats.map(group => {
+                        const total = group.submissions.length || 1;
+                        return (
+                          <div key={group.className} className="border border-gray-150 rounded-xl p-4 hover:shadow-sm transition-all bg-white flex flex-col justify-between text-left">
+                            <div>
+                              <div className="flex justify-between items-center mb-3">
+                                <span className="font-black text-gray-800 text-base flex items-center gap-1.5 uppercase font-sans">
+                                  🏫 Lớp: <span className="text-indigo-650">{group.className}</span>
+                                </span>
+                                <span className="text-xs font-bold bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg border border-indigo-100 inline-flex items-center gap-1">
+                                  <File size={12} /> {group.submissions.length} bài nộp
+                                </span>
+                              </div>
+
+                              {/* Key statistics row */}
+                              <div className="grid grid-cols-3 gap-2 bg-gray-50 p-2.5 rounded-lg border border-gray-150 text-center mb-3">
+                                <div>
+                                  <span className="text-[10px] text-gray-400 font-bold block uppercase">TB Lớp</span>
+                                  <span className="text-sm font-black text-indigo-600">{group.average.toFixed(2)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-[10px] text-gray-400 font-bold block uppercase">Cao Nhất</span>
+                                  <span className="text-sm font-black text-emerald-600">{group.max.toFixed(2)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-[10px] text-gray-400 font-bold block uppercase">Thấp Nhất</span>
+                                  <span className="text-sm font-black text-rose-600">{group.min.toFixed(2)}</span>
+                                </div>
+                              </div>
+
+                              {/* Segmented Progress Bar */}
+                              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide block">Phổ Điểm / Phân Loại học lực:</span>
+                              <div className="w-full flex h-3 rounded-full overflow-hidden bg-gray-100 mt-1 mb-2.5">
+                                {group.gioi > 0 && (
+                                  <div 
+                                    style={{ width: `${(group.gioi / total * 100)}%` }} 
+                                    className="bg-emerald-500 h-full transition-all hover:brightness-95"
+                                    title={`Giỏi (8.0 - 10.0): ${group.gioi} HS`}
+                                  />
+                                )}
+                                {group.kha > 0 && (
+                                  <div 
+                                    style={{ width: `${(group.kha / total * 100)}%` }} 
+                                    className="bg-indigo-500 h-full transition-all hover:brightness-95"
+                                    title={`Khá (6.5 - 7.9): ${group.kha} HS`}
+                                  />
+                                )}
+                                {group.tb > 0 && (
+                                  <div 
+                                    style={{ width: `${(group.tb / total * 100)}%` }} 
+                                    className="bg-amber-500 h-full transition-all hover:brightness-95"
+                                    title={`Trung bình (5.0 - 6.4): ${group.tb} HS`}
+                                  />
+                                )}
+                                {group.yeu > 0 && (
+                                  <div 
+                                    style={{ width: `${(group.yeu / total * 100)}%` }} 
+                                    className="bg-rose-500 h-full transition-all hover:brightness-95"
+                                    title={`Yếu/Kém (< 5.0): ${group.yeu} HS`}
+                                  />
+                                )}
+                              </div>
+
+                              {/* Legend with direct quantities */}
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[11px] font-semibold text-gray-650">
+                                <div className="flex items-center gap-1">
+                                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 block"></span>
+                                  <span>Giỏi: <strong className="text-emerald-700">{group.gioi}</strong> ({(group.gioi / total * 100).toFixed(0)}%)</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 block"></span>
+                                  <span>Khá: <strong className="text-indigo-705">{group.kha}</strong> ({(group.kha / total * 100).toFixed(0)}%)</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 block"></span>
+                                  <span>TB: <strong className="text-amber-700">{group.tb}</strong> ({(group.tb / total * 100).toFixed(0)}%)</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500 block"></span>
+                                  <span>Yếu: <strong className="text-rose-700">{group.yeu}</strong> ({(group.yeu / total * 100).toFixed(0)}%)</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Class Actions */}
+                            <div className="mt-4 pt-3 border-t border-gray-100 flex justify-end">
+                              <button 
+                                onClick={() => {
+                                  setResultsClassFilter(group.className);
+                                  showToast(`Đã lọc danh sách kết quả theo Lớp ${group.className}!`, "info");
+                                }}
+                                className="text-indigo-650 hover:bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer inline-flex items-center gap-1"
+                              >
+                                <Filter size={12} /> Xem danh sách lớp này
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-center py-6 text-gray-400 text-xs">Chưa có đủ dữ liệu học sinh để phân tích theo lớp.</div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Filter controls row */}
+            <div className="flex flex-col md:flex-row items-center gap-4 bg-white p-4 rounded-xl border border-gray-150 shadow-sm text-left font-sans">
+              <div className="flex-1 w-full flex flex-col sm:flex-row items-center gap-3">
+                {/* Lọc theo Lớp */}
+                <div className="w-full sm:w-1/2 flex items-center gap-2">
+                  <span className="text-xs font-bold text-gray-400 uppercase whitespace-nowrap">Lọc theo Lớp:</span>
+                  <select 
+                    value={resultsClassFilter}
+                    onChange={(e) => setResultsClassFilter(e.target.value)}
+                    className="w-full px-3 py-1.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 bg-white font-semibold cursor-pointer"
+                  >
+                    <option value="ALL">Tất cả các Lớp</option>
+                    {(() => {
+                      const uniqueClasses = Array.from(new Set(
+                        visibleResults.map(r => {
+                          const s = students.find(std => std.id === r.studentId);
+                          return s?.className?.trim() || "Tự do";
+                        })
+                      )).filter(Boolean).sort();
+                      return uniqueClasses.map(cls => (
+                        <option key={cls} value={cls}>🏫 Lớp {cls}</option>
+                      ));
+                    })()}
+                  </select>
+                </div>
+
+                {/* Lọc theo đề thi / phòng thi */}
+                <div className="w-full sm:w-1/2 flex items-center gap-2">
+                  <span className="text-xs font-bold text-gray-400 uppercase whitespace-nowrap">Phòng thi:</span>
+                  <select
+                    value={resultsExamFilter}
+                    onChange={(e) => setResultsExamFilter(e.target.value)}
+                    className="w-full px-3 py-1.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 bg-white font-semibold cursor-pointer"
+                  >
+                    <option value="ALL">Tất cả bài thi</option>
+                    {(() => {
+                      const uniqueExams = Array.from(new Map(
+                        visibleResults.map(r => [r.examId || "free", r.examName || "Đợt thi tự do"])
+                      ).entries());
+                      return uniqueExams.map(([examId, examName]) => (
+                        <option key={examId} value={examId}>📝 {examName}</option>
+                      ));
+                    })()}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex w-full md:w-auto items-center gap-2">
+                {/* Clear filters button */}
+                {(resultsClassFilter !== "ALL" || resultsExamFilter !== "ALL") && (
+                  <button
+                    onClick={() => {
+                      setResultsClassFilter("ALL");
+                      setResultsExamFilter("ALL");
+                      showToast("Đã thiết lập lại bộ lọc mặc định!", "info");
+                    }}
+                    className="w-full md:w-auto px-4 py-1.5 border border-rose-200 text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1 cursor-pointer"
+                  >
+                    <X size={14} /> Xóa bộ lọc
+                  </button>
                 )}
-              </tbody>
-            </table>
+
+                <button
+                  onClick={exportResultsToExcel}
+                  className="w-full md:w-auto px-4 py-1.5 bg-emerald-650 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm font-sans"
+                  title="Xuất bảng điểm ra file Excel (xlsx)"
+                >
+                  <Download size={14} /> Xuất Excel báo cáo
+                </button>
+              </div>
+            </div>
+
+            {/* Main results list table */}
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Thí sinh</th>
+                    <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Lớp quản lý</th>
+                    <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Đề thi / Phòng thi</th>
+                    <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase font-mono">SBD</th>
+                    <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Tổng Điểm</th>
+                    <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase">Thời gian nộp</th>
+                    <th className="px-6 py-3.5 text-xs font-bold text-gray-500 uppercase text-right">Chi tiết</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200 text-sm">
+                  {filteredResults.map(result => {
+                    const student = students.find(s => s.id === result.studentId);
+                    return (
+                      <tr key={result.id} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 font-semibold text-gray-850 text-left">
+                          <span className="block font-black text-gray-900">{result.studentName}</span>
+                        </td>
+                        <td className="px-6 py-4 text-left">
+                          <span className="px-2.5 py-1 text-xs font-black rounded-lg bg-indigo-50 border border-indigo-100/60 text-indigo-700 uppercase">
+                            🏫 {student?.className || "Tự do / Chung"}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 font-semibold text-gray-700 max-w-[200px] truncate text-left" title={result.examName || "Đợt thi tự do"}>
+                          📝 {result.examName || "Đợt thi tự do"}
+                        </td>
+                        <td className="px-6 py-4 font-mono text-gray-600 font-bold text-left">{result.studentId}</td>
+                        <td className="px-6 py-4 font-mono font-black text-indigo-600 text-base text-left">{result.score.toFixed(2)}</td>
+                        <td className="px-6 py-4 text-xs text-gray-500 font-mono text-left">{new Date(result.timestamp).toLocaleString('vi-VN')}</td>
+                        <td className="px-6 py-4 text-right flex items-center justify-end gap-2.5">
+                          <button 
+                            onClick={() => {
+                              if (onViewResultDetail) {
+                                onViewResultDetail(result);
+                              }
+                            }}
+                            className="bg-indigo-50 text-indigo-600 border border-indigo-100 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1"
+                          >
+                            <Eye size={12} /> Xem bài làm
+                          </button>
+                          <button 
+                            onClick={() => {
+                              showConfirm(
+                                "Xóa kết quả bài làm",
+                                `Bạn có chắc chắn muốn xóa bài làm của thí sinh "${result.studentName}" (SBD: ${result.studentId}, Điểm: ${result.score.toFixed(2)}) không? Thao tác này không thể hoàn tác.`,
+                                () => {
+                                  if (setResults) {
+                                    setResults(prev => prev.filter(r => r.id !== result.id));
+                                  }
+                                  fetch(`/api/results/${result.id}`, { method: "DELETE" })
+                                    .then(res => res.json())
+                                    .then(data => {
+                                      if (data.success) {
+                                        showToast("Đã xóa bài làm của thí sinh thành công!", "success");
+                                      } else {
+                                        showToast("Có lỗi xảy ra khi xóa bài làm!", "error");
+                                      }
+                                    })
+                                    .catch(err => {
+                                      console.error(err);
+                                      showToast("Lỗi kết nối máy chủ!", "error");
+                                    });
+                                }
+                              );
+                            }}
+                            className="p-1.5 text-gray-400 hover:text-red-650 hover:bg-red-50 rounded-lg transition-all cursor-pointer border border-transparent hover:border-red-100"
+                            title="Xóa bài làm"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredResults.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="text-center py-12 text-gray-400 text-xs font-medium">
+                        Không tìm thấy lượt nộp bài nào khớp với bộ lọc được chọn.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
@@ -3910,16 +5221,38 @@ function AdminDashboard({
         {isFolderModalOpen && (
           <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-2xl p-6 w-full max-w-md border border-gray-150 shadow-xl">
-              <h3 className="text-lg font-bold text-gray-900 mb-4">Thêm thư mục mới</h3>
-              <input 
-                type="text"
-                value={newFolder.name}
-                onChange={(e) => setNewFolder({ name: e.target.value })}
-                placeholder="Tên chủ đề toán học, vật lý..."
-                className="w-full px-4 py-2 border border-gray-300 rounded-xl mb-4 text-sm"
-              />
+              <h3 className="text-lg font-bold text-gray-900 mb-4">
+                {newFolder.type === "student" ? "Thêm thư mục lớp học mới" : "Thêm thư mục chủ đề mới"}
+              </h3>
+              <div className="space-y-4 mb-5">
+                <div>
+                  <label className="block text-xs font-black text-gray-500 uppercase mb-1">Tên thư mục</label>
+                  <input 
+                    type="text"
+                    value={newFolder.name}
+                    onChange={(e) => setNewFolder({ ...newFolder, name: e.target.value })}
+                    placeholder={newFolder.type === "student" ? "Ví dụ: Lớp 10A1, Khối 12 THPT..." : "Tên chủ đề toán học, vật lý..."}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-black text-gray-500 uppercase mb-1">Thư mục cha (Tạo phần mục con)</label>
+                  <select
+                    value={newFolder.parentId || ""}
+                    onChange={(e) => setNewFolder({ ...newFolder, parentId: e.target.value || undefined })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm bg-white"
+                  >
+                    <option value="">-- Thư mục gốc --</option>
+                    {getFolderDropdownList(newFolder.type === 'student' ? studentFolders : questionFolders).map(f => (
+                      <option key={f.id} value={f.id}>
+                        {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <div className="flex gap-2">
-                <button onClick={() => setIsFolderModalOpen(false)} className="flex-1 py-2 text-gray-500 font-bold text-sm">Hủy</button>
+                <button onClick={() => { setIsFolderModalOpen(false); setNewFolder({ name: "", parentId: undefined, type: "question" }); }} className="flex-1 py-2 text-gray-500 font-bold text-sm">Hủy</button>
                 <button onClick={createFolder} className="flex-1 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-colors">Lưu lại</button>
               </div>
             </motion.div>
@@ -3929,7 +5262,7 @@ function AdminDashboard({
         {isStudentModalOpen && (
           <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-2xl p-6 w-full max-w-md border border-gray-150 shadow-xl">
-              <h3 className="text-lg font-bold text-gray-900 mb-4">Thêm thí sinh mới</h3>
+              <h3 className="text-lg font-bold text-gray-900 mb-4">{editingStudentId ? "Chỉnh sửa thông tin thí sinh" : "Thêm thí sinh mới"}</h3>
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Họ và tên</label>
@@ -3938,18 +5271,25 @@ function AdminDashboard({
                     value={newStudent.name}
                     onChange={(e) => setNewStudent({ ...newStudent, name: e.target.value })}
                     placeholder="Ví dụ: Nguyễn Văn Hải"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Số báo danh (SBD)</label>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1 font-mono">Số báo danh (SBD)</label>
                   <input 
                     type="text"
                     value={newStudent.sbd}
                     onChange={(e) => setNewStudent({ ...newStudent, sbd: e.target.value })}
                     placeholder="Ví dụ: SBD024"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-mono font-bold"
+                    disabled={editingStudentId !== null}
+                    className={cn(
+                      "w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-indigo-700",
+                      editingStudentId && "bg-gray-50 opacity-90"
+                    )}
                   />
+                  {editingStudentId && (
+                    <span className="text-[10px] text-amber-600 block mt-1 font-medium">⚠️ Thay đổi Số báo danh (SBD) sẽ cập nhật khóa định danh của thí sinh</span>
+                  )}
                 </div>
                 {user?.role === "admin" ? (
                   <div>
@@ -3959,7 +5299,7 @@ function AdminDashboard({
                       value={newStudent.className || ""}
                       onChange={(e) => setNewStudent({ ...newStudent, className: e.target.value })}
                       placeholder="Ví dụ: 12A1"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-bold uppercase text-indigo-600"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-bold uppercase text-indigo-650 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                     />
                   </div>
                 ) : (
@@ -3969,8 +5309,157 @@ function AdminDashboard({
                 )}
               </div>
               <div className="flex gap-2 mt-6">
-                <button onClick={() => setIsStudentModalOpen(false)} className="flex-1 py-2 text-gray-500 font-bold text-sm">Hủy</button>
-                <button onClick={createStudent} className="flex-1 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-colors">Đăng ký</button>
+                <button onClick={() => { setIsStudentModalOpen(false); setEditingStudentId(null); setNewStudent({ name: "", sbd: "", className: "" }); }} className="flex-1 py-2 text-gray-500 font-bold text-sm">Hủy</button>
+                <button onClick={createStudent} className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm transition-colors">{editingStudentId ? "Lưu thay đổi" : "Đăng ký"}</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {isExcelImportModalOpen && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-2xl p-6 w-full max-w-xl border border-gray-150 shadow-xl max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Nhập thí sinh từ file Excel</h3>
+                  <p className="text-xs text-gray-500 mt-1">Hệ thống chấp nhận các file Excel dạng .xlsx hoặc .xls</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setIsExcelImportModalOpen(false);
+                    setExcelPreviewStudents([]);
+                    setExcelImportErrors(0);
+                    setExcelSelectedFolderId("");
+                  }}
+                  className="p-1 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Sample file download section */}
+              <div className="bg-amber-50/50 border border-amber-150 rounded-xl p-4 mb-5 flex items-center justify-between gap-4">
+                <div className="flex-1">
+                  <span className="font-bold text-xs text-amber-800 uppercase tracking-wider block">Yêu cầu tệp dữ liệu</span>
+                  <p className="text-xs text-amber-900 leading-relaxed mt-1 font-semibold">
+                    File excel nhập vào cần phải chứa các cột thông tin chuẩn: <span className="font-bold underline">Số báo danh (SBD)</span> và <span className="font-bold underline">Họ và tên</span> (Cột <span className="italic">Lớp</span> là tùy chọn).
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={downloadExcelTemplate}
+                  className="shrink-0 bg-white hover:bg-amber-100/70 border border-amber-250 text-amber-850 text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Download size={14} /> Tải file mẫu
+                </button>
+              </div>
+
+              {/* Select Folder to Import Into */}
+              <div className="mb-5 bg-indigo-50/35 border border-indigo-100 p-4 rounded-xl text-left font-sans">
+                <label className="block text-xs font-black text-indigo-700 uppercase mb-1.5 flex items-center gap-1">
+                  📁 Đưa danh sách thí sinh vào thư mục lớp học nào?
+                </label>
+                <select
+                  value={excelSelectedFolderId}
+                  onChange={(e) => setExcelSelectedFolderId(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm bg-white font-semibold text-gray-750 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all cursor-pointer"
+                >
+                  <option value="">-- Thư mục gốc (Chưa phân thư mục) --</option>
+                  {getFolderDropdownList(studentFolders).map(f => (
+                    <option key={f.id} value={f.id}>
+                      {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-indigo-650 font-semibold mt-1.5 leading-relaxed">
+                  💡 Danh sách các thí sinh sau khi nhập thành công sẽ được sắp xếp ngay vào thư mục/lớp học này.
+                </p>
+              </div>
+
+              {/* Drag and Drop / File selector */}
+              <div className="space-y-4 mb-5">
+                <label className="block border-2 border-dashed border-gray-255 hover:border-indigo-500 rounded-2xl p-6 text-center cursor-pointer bg-gray-50/50 hover:bg-indigo-50/20 transition-all group">
+                  <input
+                    type="file"
+                    accept=".xlsx, .xls"
+                    onChange={handleExcelImportFile}
+                    className="hidden"
+                  />
+                  <Upload className="mx-auto text-gray-400 group-hover:text-indigo-600 mb-2 transition-colors" size={32} />
+                  <span className="text-xs font-bold text-gray-700 block group-hover:text-indigo-700">Kéo thả file Excel vào đây hoặc nhấp để chọn</span>
+                  <span className="text-[10px] text-gray-400 block mt-1">Hỗ trợ các định dạng .xlsx, .xls tối đa 10MB</span>
+                </label>
+              </div>
+
+              {/* Data Preview */}
+              {excelPreviewStudents.length > 0 && (
+                <div className="space-y-3 mb-5 text-left">
+                  <div className="flex justify-between items-center bg-gray-50 p-2 border border-gray-150 rounded-lg">
+                    <span className="text-xs font-bold text-gray-600">Bản xem trước dữ liệu nạp</span>
+                    <div className="flex gap-2">
+                      <span className="text-[10px] font-black text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">
+                        {excelPreviewStudents.length} thí sinh hợp lệ
+                      </span>
+                      {excelImportErrors > 0 && (
+                        <span className="text-[10px] font-black text-red-700 bg-red-50 px-2 py-0.5 rounded-md">
+                          {excelImportErrors} dòng bỏ qua
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-150 rounded-xl overflow-hidden max-h-56 overflow-y-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-gray-100 sticky top-0 border-b border-gray-150">
+                        <tr>
+                          <th className="px-4 py-2 font-bold text-gray-550 uppercase">Số báo danh</th>
+                          <th className="px-4 py-2 font-bold text-gray-550 uppercase">Họ và tên</th>
+                          <th className="px-4 py-2 font-bold text-gray-550 uppercase">Lớp quản lý</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-150">
+                        {excelPreviewStudents.map((s, idx) => (
+                          <tr key={idx} className="hover:bg-gray-50">
+                            <td className="px-4 py-2 font-mono font-bold text-indigo-600">{s.id}</td>
+                            <td className="px-4 py-2 font-semibold text-gray-800">{s.name}</td>
+                            <td className="px-4 py-2 text-gray-500">
+                              <span className="px-1.5 py-0.5 font-bold rounded-md bg-indigo-50 text-indigo-700 uppercase">
+                                {s.className || "Mặc định lớp"}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setIsExcelImportModalOpen(false);
+                    setExcelPreviewStudents([]);
+                    setExcelImportErrors(0);
+                    setExcelSelectedFolderId("");
+                  }}
+                  className="flex-1 py-2 border border-gray-200 text-gray-600 hover:bg-gray-50 font-bold text-sm rounded-xl transition-all cursor-pointer"
+                >
+                  Đóng lại
+                </button>
+                <button
+                  onClick={confirmExcelImport}
+                  disabled={excelPreviewStudents.length === 0}
+                  className={cn(
+                    "flex-1 py-2 text-white rounded-xl font-bold text-sm transition-all",
+                    excelPreviewStudents.length > 0 
+                      ? "bg-indigo-650 hover:bg-indigo-700 cursor-pointer shadow-sm"
+                      : "bg-gray-200 text-gray-400 cursor-not-allowed"
+                  )}
+                >
+                  Xác nhận nhập ({excelPreviewStudents.length})
+                </button>
               </div>
             </motion.div>
           </div>
@@ -3987,19 +5476,20 @@ function AdminDashboard({
                     type="text"
                     value={newExam.name}
                     onChange={(e) => setNewExam({ ...newExam, name: e.target.value })}
-                    placeholder="Ví dụ: Kiểm tra cuối học kỳ 1 Toán 12"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm"
+                    placeholder="Ví dụ: Kiểm tra giữa kỳ môn Toán Lớp 12"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                   />
                 </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Mã tham gia phòng</label>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Mã tham gia phòng thi</label>
                     <input 
                       type="text"
                       value={newExam.code}
-                      onChange={(e) => setNewExam({ ...newExam, code: e.target.value })}
-                      placeholder="Mã viết liền: TOAN1"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-mono font-bold"
+                      onChange={(e) => setNewExam({ ...newExam, code: e.target.value.toUpperCase() })}
+                      placeholder="TOAN12"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-bold uppercase focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-indigo-650"
                     />
                   </div>
                   <div>
@@ -4009,7 +5499,7 @@ function AdminDashboard({
                       value={newExam.duration}
                       onChange={(e) => setNewExam({ ...newExam, duration: parseInt(e.target.value) || 45 })}
                       placeholder="Số phút"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-bold"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm font-bold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                     />
                   </div>
                 </div>
@@ -4021,7 +5511,7 @@ function AdminDashboard({
                       type="datetime-local"
                       value={newExam.startTime || ""}
                       onChange={(e) => setNewExam({ ...newExam, startTime: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm text-gray-700"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                     />
                   </div>
                   <div>
@@ -4030,12 +5520,49 @@ function AdminDashboard({
                       type="datetime-local"
                       value={newExam.endTime || ""}
                       onChange={(e) => setNewExam({ ...newExam, endTime: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm text-gray-700"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                     />
                   </div>
                 </div>
 
-                <div className="flex items-start gap-2.5 bg-indigo-50/30 p-3 border border-indigo-100/60 rounded-xl">
+                {/* RANDOM SHUFFLING OPTIONS */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="flex items-start gap-2.5 bg-amber-50/50 p-3 border border-amber-100/70 rounded-xl">
+                    <input 
+                      type="checkbox"
+                      id="shuffleQuestions"
+                      checked={newExam.shuffleQuestions}
+                      onChange={(e) => setNewExam({ ...newExam, shuffleQuestions: e.target.checked })}
+                      className="w-4 h-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500 mt-0.5 cursor-pointer"
+                    />
+                    <div className="select-none">
+                      <label htmlFor="shuffleQuestions" className="block text-xs font-bold text-amber-900 cursor-pointer flex items-center gap-1">
+                        <span>Xáo trộn câu hỏi</span>
+                        <span className="text-xs">🔀</span>
+                      </label>
+                      <p className="text-[10px] text-amber-650 leading-normal mt-0.5">Xáo trộn thứ tự câu hỏi trong mỗi phần (Phần I, II, III) cho từng thí sinh.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2.5 bg-orange-50/50 p-3 border border-orange-100/70 rounded-xl">
+                    <input 
+                      type="checkbox"
+                      id="shuffleAnswers"
+                      checked={newExam.shuffleAnswers}
+                      onChange={(e) => setNewExam({ ...newExam, shuffleAnswers: e.target.checked })}
+                      className="w-4 h-4 text-orange-600 border-orange-300 rounded focus:ring-orange-500 mt-0.5 cursor-pointer"
+                    />
+                    <div className="select-none">
+                      <label htmlFor="shuffleAnswers" className="block text-xs font-bold text-orange-900 cursor-pointer flex items-center gap-1">
+                        <span>Xáo trộn đáp án</span>
+                        <span>🔄</span>
+                      </label>
+                      <p className="text-[10px] text-orange-650 leading-normal mt-0.5">Xáo trộn vị trí phương án lựa chọn A-B-C-D và các mệnh đề Đúng/Sai.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-2.5 bg-indigo-50/40 p-3 border border-indigo-100/60 rounded-xl">
                   <input 
                     type="checkbox"
                     id="allowReview"
@@ -4047,7 +5574,7 @@ function AdminDashboard({
                     <label htmlFor="allowReview" className="block text-xs font-bold text-gray-750 cursor-pointer">
                       Cho phép xem lại đáp án và tải bài làm về
                     </label>
-                    <p className="text-[10px] text-gray-405 leading-relaxed mt-0.5">Sau khi hoàn thành bài, thí sinh được xem bài làm kèm lời giải, đồng thời có thể tải bài thi của mình.</p>
+                    <p className="text-[10px] text-gray-455 leading-relaxed mt-0.5">Sau khi hoàn thành bài, thí sinh được xem bài làm kèm lời giải, đồng thời có thể tải bài thi của mình.</p>
                   </div>
                 </div>
 
@@ -4060,7 +5587,7 @@ function AdminDashboard({
                     className="w-4 h-4 text-emerald-600 border-emerald-300 rounded focus:ring-emerald-500 mt-0.5 cursor-pointer"
                   />
                   <div className="select-none">
-                    <label htmlFor="isFree" className="block text-xs font-bold text-emerald-900 cursor-pointer">
+                    <label htmlFor="isFree" className="block text-xs font-bold text-emerald-950 cursor-pointer">
                       Đề thi luyện tập tự do (Hiển thị ở trang chủ cho Thí sinh tự do 🚀)
                     </label>
                     <p className="text-[10px] text-emerald-650 leading-relaxed mt-0.5">Nếu kích hoạt, bài thi này sẽ tự động xuất hiện công khai trên trang chủ để các thí sinh tự do vào ôn luyện.</p>
@@ -4101,7 +5628,7 @@ function AdminDashboard({
                           value={newExam.part3Point}
                           onChange={(e) => setNewExam({ ...newExam, part3Point: parseFloat(e.target.value) || 0 })}
                           className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-xs font-bold text-center bg-white"
-                          placeholder="0.25"
+                          placeholder="0.5"
                         />
                         <span className="text-[9px] text-gray-400 block mt-0.5 text-center">đ/câu đúng</span>
                       </div>
@@ -4181,8 +5708,10 @@ function AdminDashboard({
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs bg-white font-medium"
                       >
                         <option value="ALL">-- Tất cả câu hỏi trong hệ thống --</option>
-                        {visibleFolders.map(f => (
-                          <option key={f.id} value={f.id}>{f.name}</option>
+                        {getFolderDropdownList(questionFolders).map(f => (
+                          <option key={f.id} value={f.id}>
+                            {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                          </option>
                         ))}
                       </select>
                     </div>
@@ -4306,8 +5835,10 @@ function AdminDashboard({
                     className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm"
                   >
                     <option value="">-- Không phân loại --</option>
-                    {visibleFolders.map(f => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
+                    {getFolderDropdownList(visibleFolders).map(f => (
+                      <option key={f.id} value={f.id}>
+                        {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                      </option>
                     ))}
                   </select>
                 </div>
@@ -4590,7 +6121,7 @@ function AdminDashboard({
                     onClick={handleDownloadSampleDoc}
                     className="bg-indigo-600 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold hover:bg-indigo-700 transition-all flex items-center gap-1.5 shadow-sm shadow-indigo-100"
                   >
-                    <Download size={14} /> Tải file mẫu (.doc)
+                    <Download size={14} /> Tải file mẫu (.docx)
                   </button>
                 </div>
 
@@ -4617,8 +6148,10 @@ function AdminDashboard({
                       className="w-full px-4 py-3.5 border border-gray-300 rounded-xl text-sm"
                     >
                       <option value="">-- Không phân loại --</option>
-                      {visibleFolders.map(f => (
-                        <option key={f.id} value={f.id}>{f.name}</option>
+                      {getFolderDropdownList(visibleFolders).map(f => (
+                        <option key={f.id} value={f.id}>
+                          {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                        </option>
                       ))}
                     </select>
                   </div>
@@ -5030,7 +6563,7 @@ export default function App() {
     const p2Pt2 = typeof currentExam.part2Point2 === 'number' ? currentExam.part2Point2 : 0.25;
     const p2Pt3 = typeof currentExam.part2Point3 === 'number' ? currentExam.part2Point3 : 0.5;
     const p2Pt4 = typeof currentExam.part2Point4 === 'number' ? currentExam.part2Point4 : 1.0;
-    const p3Pt = typeof currentExam.part3Point === 'number' ? currentExam.part3Point : 0.25;
+    const p3Pt = typeof currentExam.part3Point === 'number' ? currentExam.part3Point : 0.5;
 
     examQuestions.forEach(q => {
       const userAnswer = answers[q.id];
@@ -5076,11 +6609,24 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(result)
     }).catch(err => console.error("Error submitting result to SQLite database:", err));
+    
+    // Clear session-based attempt seed so retaking or next login gets freshly randomized shuffled sequence
+    try {
+      const sessionKey = `exam-attempt-seed-${currentExam.id}-${user.sbd}`;
+      sessionStorage.removeItem(sessionKey);
+    } catch (e) {}
+
     setIsExamStarted(false);
     setView("result");
   };
 
   const logout = () => {
+    if (user && currentExam) {
+      try {
+        const sessionKey = `exam-attempt-seed-${currentExam.id}-${user.sbd}`;
+        sessionStorage.removeItem(sessionKey);
+      } catch (e) {}
+    }
     setUser(null);
     setView("home");
     setIsExamStarted(false);

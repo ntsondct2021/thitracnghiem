@@ -200,7 +200,7 @@ export default function HomeView({
 
           <div className="flex flex-wrap items-center justify-center gap-4 pt-4">
             <button
-              onClick={() => {  
+              onClick={() => {
                 const element = document.getElementById("bài-thi");
                 if (element) element.scrollIntoView({ behavior: "smooth" });
               }}
@@ -497,7 +497,7 @@ export default function HomeView({
                     <input 
                       type="text"
                       required
-                      placeholder="Ví dụ: Amsterdam"
+                      placeholder="Ví dụ: Đỗ Công Tường"
                       value={regSchool}
                       onChange={(e) => setRegSchool(e.target.value)}
                       className="w-full px-4 py-2.5 border border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/80 rounded-xl text-sm font-semibold text-slate-800 transition-all focus:outline-none"

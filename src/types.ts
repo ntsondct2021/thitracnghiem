@@ -9,6 +9,8 @@ export interface Folder {
   name: string;
   createdAt: string;
   teacherId?: string;
+  parentId?: string;
+  type?: 'question' | 'student';
 }
 
 export interface Question {
@@ -50,6 +52,7 @@ export interface Student {
   createdAt: string;
   teacherId?: string; // ID of the teacher who registered them
   className?: string; // Class name or identifier
+  folderId?: string;
 }
 
 export interface Teacher {
@@ -79,4 +82,6 @@ export interface ExamRoom {
   allowReview?: boolean;
   teacherId?: string;
   isFree?: boolean;
+  shuffleQuestions?: boolean;
+  shuffleAnswers?: boolean;
 }
