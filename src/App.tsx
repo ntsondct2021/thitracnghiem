@@ -2580,6 +2580,7 @@ function AdminDashboard({
   const [editingExamRoomId, setEditingExamRoomId] = useState<string | null>(null);
   
   const [newFolder, setNewFolder] = useState<{ name: string; parentId?: string; type?: 'question' | 'student' }>({ name: "", parentId: undefined, type: "question" });
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [studentFolderFilter, setStudentFolderFilter] = useState<string>("ALL");
   const [resultsClassFilter, setResultsClassFilter] = useState<string>("ALL");
   const [resultsExamFilter, setResultsExamFilter] = useState<string>("ALL");
@@ -3377,9 +3378,101 @@ function AdminDashboard({
     setExpandedFolderIds(prev => ({ ...prev, [id]: !(prev[id] ?? true) }));
   };
 
+  const moveFolder = (folderId: string, direction: "up" | "down") => {
+    const folder = folders.find(f => f.id === folderId);
+    if (!folder) return;
+
+    // Filter siblings: same parent and same type
+    const siblings = folders
+      .filter(f => f.parentId === folder.parentId && f.type === folder.type)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)); // sorted descending visually
+
+    const currentIndex = siblings.findIndex(s => s.id === folderId);
+    if (currentIndex === -1) return;
+
+    let targetIndex = -1;
+    if (direction === "up" && currentIndex > 0) {
+      targetIndex = currentIndex - 1;
+    } else if (direction === "down" && currentIndex < siblings.length - 1) {
+      targetIndex = currentIndex + 1;
+    }
+
+    if (targetIndex !== -1) {
+      const targetFolder = siblings[targetIndex];
+      
+      // Swap createdAt timestamps to swap visual display order
+      const tempTime = folder.createdAt;
+      const updatedFolder = { ...folder, createdAt: targetFolder.createdAt };
+      const updatedTarget = { ...targetFolder, createdAt: tempTime };
+
+      // Update local state
+      setFolders(prev => prev.map(f => {
+        if (f.id === folder.id) return updatedFolder;
+        if (f.id === targetFolder.id) return updatedTarget;
+        return f;
+      }));
+
+      // Update on database
+      Promise.all([
+        fetch("/api/folders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updatedFolder)
+        }),
+        fetch("/api/folders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updatedTarget)
+        })
+      ]).then(() => {
+        showToast("Đã thay đổi vị trí thư mục thành công!", "success");
+      }).catch(err => console.error("Error swapping folder positions:", err));
+    }
+  };
+
   const createFolder = () => {
     if (!newFolder.name.trim()) return;
     const folderType = newFolder.type || "question";
+    
+    if (editingFolderId) {
+      // Editing an existing folder
+      setFolders(prev => prev.map(f => {
+        if (f.id === editingFolderId) {
+          return {
+            ...f,
+            name: newFolder.name.trim(),
+            parentId: newFolder.parentId,
+            type: folderType
+          };
+        }
+        return f;
+      }));
+      
+      const folderToUpdate = folders.find(f => f.id === editingFolderId);
+      if (folderToUpdate) {
+        const updated = {
+          ...folderToUpdate,
+          name: newFolder.name.trim(),
+          parentId: newFolder.parentId,
+          type: folderType
+        };
+        fetch("/api/folders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updated)
+        })
+        .then(() => {
+          showToast("Đã cập nhật thông tin thư mục thành công!", "success");
+        })
+        .catch(err => console.error("Error updating folder:", err));
+      }
+      
+      setNewFolder({ name: "", parentId: undefined, type: "question" });
+      setEditingFolderId(null);
+      setIsFolderModalOpen(false);
+      return;
+    }
+
     const folder: Folder = {
       id: Date.now().toString(),
       name: newFolder.name.trim(),
@@ -3882,10 +3975,11 @@ function AdminDashboard({
   };
 
   const visibleFolders = useMemo(() => {
+    let list = folders;
     if (user?.role === "teacher") {
-      return folders.filter(f => f.teacherId === user.sbd);
+      list = folders.filter(f => f.teacherId === user.sbd);
     }
-    return folders;
+    return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [folders, user]);
 
   const questionFolders = useMemo(() => {
@@ -4207,6 +4301,13 @@ function AdminDashboard({
             
             const directQuestionCount = visibleQuestions.filter(q => q.folderId === folder.id).length;
             const totalQuestionCount = getFolderQuestionCount(folder.id);
+            const siblings = questionFolders
+              .filter(f => f.parentId === folder.parentId)
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+            const siblingIndex = siblings.findIndex(s => s.id === folder.id);
+            const canGoUp = siblingIndex > 0;
+            const canGoDown = siblingIndex < siblings.length - 1 && siblingIndex !== -1;
+
             return (
               <div key={folder.id} className="space-y-2">
                 {/* Folder Row */}
@@ -4245,6 +4346,46 @@ function AdminDashboard({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 bg-gray-50 px-1.5 py-0.5 rounded-lg border border-gray-100 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity whitespace-nowrap">
+                    {/* Move Up */}
+                    <button
+                      onClick={() => moveFolder(folder.id, "up")}
+                      disabled={!canGoUp}
+                      title={canGoUp ? "Di chuyển lên phía trên" : "Đã ở vị trí đầu tiên"}
+                      className={cn(
+                        "p-1 rounded cursor-pointer transition-colors",
+                        canGoUp ? "text-amber-600 hover:bg-amber-100 hover:text-amber-700" : "text-gray-300 cursor-not-allowed"
+                      )}
+                    >
+                      <ChevronUp size={14} />
+                    </button>
+
+                    {/* Move Down */}
+                    <button
+                      onClick={() => moveFolder(folder.id, "down")}
+                      disabled={!canGoDown}
+                      title={canGoDown ? "Di chuyển xuống phía dưới" : "Đã ở vị trí cuối cùng"}
+                      className={cn(
+                        "p-1 rounded cursor-pointer transition-colors",
+                        canGoDown ? "text-amber-600 hover:bg-amber-100 hover:text-amber-700" : "text-gray-300 cursor-not-allowed"
+                      )}
+                    >
+                      <ChevronDown size={14} />
+                    </button>
+
+                    {/* Edit Name & Parent */}
+                    <button
+                      onClick={() => {
+                        setNewFolder({ name: folder.name, parentId: folder.parentId, type: "question" });
+                        setEditingFolderId(folder.id);
+                        setIsFolderModalOpen(true);
+                      }}
+                      title="Chỉnh sửa tên & đổi thư mục cha"
+                      className="p-1 text-blue-600 hover:bg-blue-100 rounded cursor-pointer transition-colors"
+                    >
+                      <Edit size={14} />
+                    </button>
+
+                    {/* Add Subfolder */}
                     <button
                       onClick={() => {
                         setNewFolder({ name: "", parentId: folder.id, type: "question" });
@@ -5222,7 +5363,11 @@ function AdminDashboard({
           <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-2xl p-6 w-full max-w-md border border-gray-150 shadow-xl">
               <h3 className="text-lg font-bold text-gray-900 mb-4">
-                {newFolder.type === "student" ? "Thêm thư mục lớp học mới" : "Thêm thư mục chủ đề mới"}
+                {editingFolderId ? (
+                  newFolder.type === "student" ? "Chỉnh sửa thư mục lớp học" : "Chỉnh sửa thư mục chủ đề"
+                ) : (
+                  newFolder.type === "student" ? "Thêm thư mục lớp học mới" : "Thêm thư mục chủ đề mới"
+                )}
               </h3>
               <div className="space-y-4 mb-5">
                 <div>
@@ -5236,23 +5381,39 @@ function AdminDashboard({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-black text-gray-500 uppercase mb-1">Thư mục cha (Tạo phần mục con)</label>
+                  <label className="block text-xs font-black text-gray-500 uppercase mb-1">Thư mục cha (Vị trí trong cây)</label>
                   <select
                     value={newFolder.parentId || ""}
                     onChange={(e) => setNewFolder({ ...newFolder, parentId: e.target.value || undefined })}
                     className="w-full px-4 py-2 border border-gray-300 rounded-xl text-sm bg-white"
                   >
                     <option value="">-- Thư mục gốc --</option>
-                    {getFolderDropdownList(newFolder.type === 'student' ? studentFolders : questionFolders).map(f => (
-                      <option key={f.id} value={f.id}>
-                        {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
-                      </option>
-                    ))}
+                    {(() => {
+                      const isDescendant = (parentFoldId: string, childFoldId: string): boolean => {
+                        let curr = folders.find(f => f.id === childFoldId);
+                        while (curr && curr.parentId) {
+                          if (curr.parentId === parentFoldId) return true;
+                          curr = folders.find(f => f.id === curr.parentId);
+                        }
+                        return false;
+                      };
+                      const rawFolders = newFolder.type === 'student' ? studentFolders : questionFolders;
+                      const dropdownFolders = getFolderDropdownList(rawFolders);
+                      const filteredFolders = editingFolderId
+                        ? dropdownFolders.filter(f => f.id !== editingFolderId && !isDescendant(editingFolderId, f.id))
+                        : dropdownFolders;
+                        
+                      return filteredFolders.map(f => (
+                        <option key={f.id} value={f.id}>
+                          {"\u00A0\u00A0".repeat(f.level * 2)}{f.level > 0 ? "↳ " : ""}📁 {f.name}
+                        </option>
+                      ));
+                    })()}
                   </select>
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => { setIsFolderModalOpen(false); setNewFolder({ name: "", parentId: undefined, type: "question" }); }} className="flex-1 py-2 text-gray-500 font-bold text-sm">Hủy</button>
+                <button onClick={() => { setIsFolderModalOpen(false); setNewFolder({ name: "", parentId: undefined, type: "question" }); setEditingFolderId(null); }} className="flex-1 py-2 text-gray-500 font-bold text-sm">Hủy</button>
                 <button onClick={createFolder} className="flex-1 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-colors">Lưu lại</button>
               </div>
             </motion.div>
@@ -6640,6 +6801,7 @@ export default function App() {
             key="home"
             examRooms={examRooms}
             questions={questions}
+            folders={folders}
             onStartExam={startExam}
             onStudentLogin={handleStudentLogin}
             onNavigateToLogin={() => setView("login")}
